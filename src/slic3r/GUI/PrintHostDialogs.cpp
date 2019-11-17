@@ -92,12 +92,13 @@ void PrintHostSendDialog::EndModal(int ret)
         // Persist path and print settings
         wxString path = txt_filename->GetValue();
         int last_slash = path.Find('/', true);
-        if (last_slash != wxNOT_FOUND) {
+		if (last_slash == wxNOT_FOUND)
+			path.clear();
+		else
             path = path.SubString(0, last_slash);
-            wxGetApp().app_config->set("recent", CONFIG_KEY_PATH, into_u8(path));
-        }
-
-        GUI::get_app_config()->set("recent", CONFIG_KEY_PRINT, start_print() ? "1" : "0");
+		AppConfig *app_config = wxGetApp().app_config;
+		app_config->set("recent", CONFIG_KEY_PATH, into_u8(path));
+        app_config->set("recent", CONFIG_KEY_PRINT, start_print() ? "1" : "0");
     }
 
     MsgDialog::EndModal(ret);
@@ -249,7 +250,7 @@ void PrintHostQueueDialog::on_list_select()
 
 void PrintHostQueueDialog::on_progress(Event &evt)
 {
-    wxCHECK_RET(evt.job_id < job_list->GetItemCount(), "Out of bounds access to job list");
+    wxCHECK_RET(evt.job_id < (size_t)job_list->GetItemCount(), "Out of bounds access to job list");
 
     if (evt.progress < 100) {
         set_state(evt.job_id, ST_PROGRESS);
@@ -264,7 +265,7 @@ void PrintHostQueueDialog::on_progress(Event &evt)
 
 void PrintHostQueueDialog::on_error(Event &evt)
 {
-    wxCHECK_RET(evt.job_id < job_list->GetItemCount(), "Out of bounds access to job list");
+    wxCHECK_RET(evt.job_id < (size_t)job_list->GetItemCount(), "Out of bounds access to job list");
 
     set_state(evt.job_id, ST_ERROR);
 
@@ -279,7 +280,7 @@ void PrintHostQueueDialog::on_error(Event &evt)
 
 void PrintHostQueueDialog::on_cancel(Event &evt)
 {
-    wxCHECK_RET(evt.job_id < job_list->GetItemCount(), "Out of bounds access to job list");
+    wxCHECK_RET(evt.job_id < (size_t)job_list->GetItemCount(), "Out of bounds access to job list");
 
     set_state(evt.job_id, ST_CANCELLED);
     job_list->SetValue(wxVariant(0), evt.job_id, COL_PROGRESS);

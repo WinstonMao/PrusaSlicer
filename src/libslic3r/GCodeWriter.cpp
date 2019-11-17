@@ -269,7 +269,7 @@ std::string GCodeWriter::set_speed(double F, const std::string &comment, const s
     assert(F > 0.);
     assert(F < 100000.);
     std::ostringstream gcode;
-    gcode << "G1 F" << F;
+    gcode << "G1 F" << XYZF_NUM(F);
     COMMENT(comment);
     gcode << cooling_marker;
     gcode << "\n";
@@ -298,7 +298,11 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
         used for unlift. */
     if (!this->will_move_z(point(2))) {
         double nominal_z = m_pos(2) - m_lifted;
-        m_lifted = m_lifted - (point(2) - nominal_z);
+        m_lifted -= (point(2) - nominal_z);
+        // In case that retract_lift == layer_height we could end up with almost zero in_m_lifted
+        // and a retract could be skipped (https://github.com/prusa3d/PrusaSlicer/issues/2154
+        if (std::abs(m_lifted) < EPSILON)
+            m_lifted = 0.;
         return this->travel_to_xy(to_2d(point));
     }
     
@@ -324,7 +328,9 @@ std::string GCodeWriter::travel_to_z(double z, const std::string &comment)
         reducing the lift amount that will be used for unlift. */
     if (!this->will_move_z(z)) {
         double nominal_z = m_pos(2) - m_lifted;
-        m_lifted = m_lifted - (z - nominal_z);
+        m_lifted -= (z - nominal_z);
+        if (std::abs(m_lifted) < EPSILON)
+            m_lifted = 0.;
         return "";
     }
     

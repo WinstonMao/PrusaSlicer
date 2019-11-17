@@ -13,6 +13,10 @@
 #define ENABLE_RENDER_SELECTION_CENTER 0
 // Shows an imgui dialog with render related data
 #define ENABLE_RENDER_STATISTICS 0
+// Shows an imgui dialog with camera related data
+#define ENABLE_CAMERA_STATISTICS 0
+//  Render the picking pass instead of the main scene (use [T] key to toggle between regular rendering and picking pass only rendering)
+#define ENABLE_RENDER_PICKING_PASS 0
 
 
 //====================
@@ -29,42 +33,13 @@
 
 
 //====================
-// 1.42.0.alpha4 techs
+// 2.2.0.alpha1 techs
 //====================
-#define ENABLE_1_42_0_ALPHA4 1
+#define ENABLE_2_2_0_ALPHA1 1
 
-// Changed algorithm to extract euler angles from rotation matrix
-#define ENABLE_NEW_EULER_ANGLES (1 && ENABLE_1_42_0_ALPHA4)
-// Modified initial default placement of generic subparts
-#define ENABLE_GENERIC_SUBPARTS_PLACEMENT (1 && ENABLE_1_42_0_ALPHA4)
-// Bunch of fixes related to volumes centering
-#define ENABLE_VOLUMES_CENTERING_FIXES (1 && ENABLE_1_42_0_ALPHA4)
-
-
-//====================
-// 1.42.0.alpha7 techs
-//====================
-#define ENABLE_1_42_0_ALPHA7 1
-
-// Printbed textures generated from svg files
-#define ENABLE_TEXTURES_FROM_SVG (1 && ENABLE_1_42_0_ALPHA7)
-
-
-//====================
-// 1.42.0.alpha8 techs
-//====================
-#define ENABLE_1_42_0_ALPHA8 1
-
-// Toolbars and Gizmos use icons imported from svg files
-#define ENABLE_SVG_ICONS (1 && ENABLE_1_42_0_ALPHA8 && ENABLE_TEXTURES_FROM_SVG)
-
-
-//====================
-// 1.42.0.rc techs
-//====================
-#define ENABLE_1_42_0_RC 1
-
-// Disables Edit->Deselect all item menu item
-#define DISABLE_DESELECT_ALL_MENU_ITEM (1 && ENABLE_1_42_0_RC)
+// Enable thumbnail generator
+#define ENABLE_THUMBNAIL_GENERATOR (1 && ENABLE_2_2_0_ALPHA1)
+#define ENABLE_THUMBNAIL_GENERATOR_DEBUG (0 && ENABLE_THUMBNAIL_GENERATOR)
+#define ENABLE_THUMBNAIL_GENERATOR_PNG_TO_GCODE (1 && ENABLE_THUMBNAIL_GENERATOR)
 
 #endif // _technologies_h_

@@ -3,8 +3,9 @@
 
 #include <boost/algorithm/string.hpp>
 #include <boost/nowide/convert.hpp>
+#include <boost/nowide/cstdio.hpp>
 
-#include <miniz/miniz_zip.h>
+#include "miniz_extension.hpp"
 
 #include <Eigen/Geometry>
 
@@ -160,16 +161,15 @@ static void extract_model_from_archive(
         else {
             // Header has been extracted. Now read the faces.
             stl_file &stl = mesh.stl;
-            stl.error = 0;
             stl.stats.type = inmemory;
             stl.stats.number_of_facets = header.nTriangles;
             stl.stats.original_num_facets = header.nTriangles;
             stl_allocate(&stl);
             if (header.nTriangles > 0 && data.size() == 50 * header.nTriangles + sizeof(StlHeader)) {
-                memcpy((char*)stl.facet_start, data.data() + sizeof(StlHeader), 50 * header.nTriangles);
+                memcpy((char*)stl.facet_start.data(), data.data() + sizeof(StlHeader), 50 * header.nTriangles);
                 if (sizeof(stl_facet) > SIZEOF_STL_FACET) {
                     // The stl.facet_start is not packed tightly. Unpack the array of stl_facets.
-                    unsigned char *data = (unsigned char*)stl.facet_start;
+                    unsigned char *data = (unsigned char*)stl.facet_start.data();
                     for (size_t i = header.nTriangles - 1; i > 0; -- i)
                         memmove(data + i * sizeof(stl_facet), data + i * SIZEOF_STL_FACET, SIZEOF_STL_FACET);
                 }
@@ -246,7 +246,7 @@ static void extract_model_from_archive(
                 sscanf(normal_buf[2], "%f", &facet.normal(2)) != 1) {
                 // Normal was mangled. Maybe denormals or "not a number" were stored?
                 // Just reset the normal and silently ignore it.
-                memset(&facet.normal, 0, sizeof(facet.normal));
+                facet.normal = stl_normal::Zero();
             }
             facets.emplace_back(facet);
         }
@@ -256,7 +256,7 @@ static void extract_model_from_archive(
             stl.stats.number_of_facets = (uint32_t)facets.size();
             stl.stats.original_num_facets = (int)facets.size();
             stl_allocate(&stl);
-            memcpy((void*)stl.facet_start, facets.data(), facets.size() * 50);
+            memcpy((void*)stl.facet_start.data(), facets.data(), facets.size() * 50);
             stl_get_size(&stl);
             mesh.repair();
             // Add a mesh to a model.
@@ -278,7 +278,7 @@ static void extract_model_from_archive(
         instance->set_rotation(instance_rotation);
         instance->set_scaling_factor(instance_scaling_factor);
         instance->set_offset(instance_offset);
-        if (group_id != (size_t)-1)
+        if (group_id != (unsigned int)(-1))
             group_to_model_object[group_id] = model_object;
     } else {
         // This is not the 1st mesh of a group. Add it to the ModelObject.
@@ -298,10 +298,11 @@ bool load_prus(const char *path, Model *model)
 {
     mz_zip_archive archive;
     mz_zip_zero_struct(&archive);
-    mz_bool res = mz_zip_reader_init_file(&archive, path, 0);
+
     size_t  n_models_initial = model->objects.size();
+    mz_bool res              = MZ_FALSE;
     try {
-        if (res == MZ_FALSE)
+        if (!open_zip_reader(&archive, path))
             throw std::runtime_error(std::string("Unable to init zip reader for ") + path);
         std::vector<char>           scene_xml_data;
         // For grouping multiple STLs into a single ModelObject for multi-material prints.
@@ -326,11 +327,11 @@ bool load_prus(const char *path, Model *model)
             }
         }
     } catch (std::exception &ex) {
-        mz_zip_reader_end(&archive);
+        close_zip_reader(&archive);
         throw ex;
     }
 
-    mz_zip_reader_end(&archive);
+    close_zip_reader(&archive);
     return model->objects.size() > n_models_initial;
 }
 

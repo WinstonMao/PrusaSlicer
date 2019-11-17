@@ -3,9 +3,6 @@
 
 #include <cassert>
 
-// For caching nfps
-#include <unordered_map>
-
 // For parallel for
 #include <functional>
 #include <iterator>
@@ -73,55 +70,6 @@ inline void enumerate(
     for(TN fi = 0; fi < N; ++fi) rets[fi].wait();
 #endif
 }
-
-}
-
-namespace __itemhash {
-
-using Key = size_t;
-
-template<class S>
-Key hash(const _Item<S>& item) {
-    using Point = TPoint<S>;
-    using Segment = _Segment<Point>;
-
-    static const int N = 26;
-    static const int M = N*N - 1;
-
-    std::string ret;
-    auto& rhs = item.rawShape();
-    auto& ctr = sl::contour(rhs);
-    auto it = ctr.begin();
-    auto nx = std::next(it);
-
-    double circ = 0;
-    while(nx != ctr.end()) {
-        Segment seg(*it++, *nx++);
-        Radians a = seg.angleToXaxis();
-        double deg = Degrees(a);
-        int ms = 'A', ls = 'A';
-        while(deg > N) { ms++; deg -= N; }
-        ls += int(deg);
-        ret.push_back(char(ms)); ret.push_back(char(ls));
-        circ += seg.length();
-    }
-
-    it = ctr.begin(); nx = std::next(it);
-
-    while(nx != ctr.end()) {
-        Segment seg(*it++, *nx++);
-        auto l = int(M * seg.length() / circ);
-        int ms = 'A', ls = 'A';
-        while(l > N) { ms++; l -= N; }
-        ls += l;
-        ret.push_back(char(ms)); ret.push_back(char(ls));
-    }
-
-    return std::hash<std::string>()(ret);
-}
-
-template<class S>
-using Hash = std::unordered_map<Key, nfp::NfpResult<S>>;
 
 }
 
@@ -249,6 +197,11 @@ template<class RawShape> class EdgeCache {
     std::vector<ContourCache> holes_;
 
     double accuracy_ = 1.0;
+    
+    static double length(const Edge &e) 
+    { 
+        return std::sqrt(e.template sqlength<double>());
+    }
 
     void createCache(const RawShape& sh) {
         {   // For the contour
@@ -260,7 +213,7 @@ template<class RawShape> class EdgeCache {
 
             while(next != endit) {
                 contour_.emap.emplace_back(*(first++), *(next++));
-                contour_.full_distance += contour_.emap.back().length();
+                contour_.full_distance += length(contour_.emap.back());
                 contour_.distances.emplace_back(contour_.full_distance);
             }
         }
@@ -275,7 +228,7 @@ template<class RawShape> class EdgeCache {
 
             while(next != endit) {
                 hc.emap.emplace_back(*(first++), *(next++));
-                hc.full_distance += hc.emap.back().length();
+                hc.full_distance += length(hc.emap.back());
                 hc.distances.emplace_back(hc.full_distance);
             }
 
@@ -524,16 +477,8 @@ class _NofitPolyPlacer: public PlacerBoilerplate<_NofitPolyPlacer<RawShape, TBin
 
     using MaxNfpLevel = nfp::MaxNfpLevel<RawShape>;
 
-    using ItemKeys = std::vector<__itemhash::Key>;
-
     // Norming factor for the optimization function
     const double norm_;
-
-    // Caching calculated nfps
-    __itemhash::Hash<RawShape> nfpcache_;
-
-    // Storing item hash keys
-    ItemKeys item_keys_;
 
 public:
 
@@ -541,7 +486,12 @@ public:
 
     inline explicit _NofitPolyPlacer(const BinType& bin):
         Base(bin),
-        norm_(std::sqrt(sl::area(bin))) {}
+        norm_(std::sqrt(sl::area(bin)))
+    {
+        // In order to not have items out of bin, it will be shrinked by an
+        // very little empiric offset value.
+        // sl::offset(bin_, 1e-5 * norm_);
+    }
 
     _NofitPolyPlacer(const _NofitPolyPlacer&) = default;
     _NofitPolyPlacer& operator=(const _NofitPolyPlacer&) = default;
@@ -576,8 +526,12 @@ public:
 
     static inline double overfit(const Box& bb, const Box& bin)
     {
-        auto wdiff = double(bb.width() - bin.width());
-        auto hdiff = double(bb.height() - bin.height());
+        auto Bw = bin.width();
+        auto Bh = bin.height();
+        auto mBw = -Bw;
+        auto mBh = -Bh;
+        auto wdiff = double(bb.width()) + mBw;
+        auto hdiff = double(bb.height()) + mBh;
         double diff = 0;
         if(wdiff > 0) diff += wdiff;
         if(hdiff > 0) diff += hdiff;
@@ -622,15 +576,12 @@ public:
 private:
 
     using Shapes = TMultiShape<RawShape>;
-    using ItemRef = std::reference_wrapper<Item>;
-    using ItemWithHash = const std::pair<ItemRef, __itemhash::Key>;
 
-    Shapes calcnfp(const ItemWithHash itsh, Lvl<nfp::NfpLevel::CONVEX_ONLY>)
+    Shapes calcnfp(const Item &trsh, Lvl<nfp::NfpLevel::CONVEX_ONLY>)
     {
         using namespace nfp;
 
         Shapes nfps(items_.size());
-        const Item& trsh = itsh.first;
 
         // /////////////////////////////////////////////////////////////////////
         // TODO: this is a workaround and should be solved in Item with mutexes
@@ -664,12 +615,11 @@ private:
 
 
     template<class Level>
-    Shapes calcnfp( const ItemWithHash itsh, Level)
+    Shapes calcnfp(const Item &trsh, Level)
     { // Function for arbitrary level of nfp implementation
         using namespace nfp;
 
         Shapes nfps;
-        const Item& trsh = itsh.first;
 
         auto& orb = trsh.transformedShape();
         bool orbconvex = trsh.isContourConvex();
@@ -796,7 +746,6 @@ private:
             // optimize
             config_.object_function = prev_func;
         }
-
     }
 
     struct Optimum {
@@ -811,28 +760,13 @@ private:
 
     class Optimizer: public opt::TOptimizer<opt::Method::L_SUBPLEX> {
     public:
-        Optimizer() {
+        Optimizer(float accuracy = 1.f) {
             opt::StopCriteria stopcr;
-            stopcr.max_iterations = 200;
+            stopcr.max_iterations = unsigned(std::floor(1000 * accuracy));
             stopcr.relative_score_difference = 1e-20;
             this->stopcr_ = stopcr;
         }
     };
-
-    static Box boundingBox(const Box& pilebb, const Box& ibb ) {
-        auto& pminc = pilebb.minCorner();
-        auto& pmaxc = pilebb.maxCorner();
-        auto& iminc = ibb.minCorner();
-        auto& imaxc = ibb.maxCorner();
-        Vertex minc, maxc;
-
-        setX(minc, std::min(getX(pminc), getX(iminc)));
-        setY(minc, std::min(getY(pminc), getY(iminc)));
-
-        setX(maxc, std::max(getX(pmaxc), getX(imaxc)));
-        setY(maxc, std::max(getY(pmaxc), getY(imaxc)));
-        return Box(minc, maxc);
-    }
 
     using Edges = EdgeCache<RawShape>;
 
@@ -850,8 +784,6 @@ private:
         if(remaining.valid) {
             remlist.insert(remlist.end(), remaining.from, remaining.to);
         }
-
-        size_t itemhash = __itemhash::hash(item);
 
         if(items_.empty()) {
             setInitialPosition(item);
@@ -877,7 +809,7 @@ private:
                 // it is disjunct from the current merged pile
                 placeOutsideOfBin(item);
 
-                nfps = calcnfp({item, itemhash}, Lvl<MaxNfpLevel::value>());
+                nfps = calcnfp(item, Lvl<MaxNfpLevel::value>());
 
                 auto iv = item.referenceVertex();
 
@@ -930,7 +862,7 @@ private:
                     _objfunc = [norm, binbb, pbb, ins_check](const Item& item)
                     {
                         auto ibb = item.boundingBox();
-                        auto fullbb = boundingBox(pbb, ibb);
+                        auto fullbb = sl::boundingBox(pbb, ibb);
 
                         double score = pl::distance(ibb.center(),
                                                     binbb.center());
@@ -1000,14 +932,15 @@ private:
 
                     auto& rofn = rawobjfunc;
                     auto& nfpoint = getNfpPoint;
+                    float accuracy = config_.accuracy;
 
                     __parallel::enumerate(
                                 cache.corners().begin(),
                                 cache.corners().end(),
-                                [&results, &item, &rofn, &nfpoint, ch]
+                                [&results, &item, &rofn, &nfpoint, ch, accuracy]
                                 (double pos, size_t n)
                     {
-                        Optimizer solver;
+                        Optimizer solver(accuracy);
 
                         Item itemcpy = item;
                         auto contour_ofn = [&rofn, &nfpoint, ch, &itemcpy]
@@ -1054,10 +987,10 @@ private:
                         __parallel::enumerate(cache.corners(hidx).begin(),
                                       cache.corners(hidx).end(),
                                       [&results, &item, &nfpoint,
-                                       &rofn, ch, hidx]
+                                       &rofn, ch, hidx, accuracy]
                                       (double pos, size_t n)
                         {
-                            Optimizer solver;
+                            Optimizer solver(accuracy);
 
                             Item itmcpy = item;
                             auto hole_ofn =
@@ -1113,7 +1046,6 @@ private:
 
         if(can_pack) {
             ret = PackResult(item);
-            item_keys_.emplace_back(itemhash);
         } else {
             ret = PackResult(best_overfit);
         }
@@ -1185,7 +1117,12 @@ private:
     }
 
     void setInitialPosition(Item& item) {
-        Box&& bb = item.boundingBox();
+        auto sh = item.rawShape();
+        sl::translate(sh, item.translation());
+        sl::rotate(sh, item.rotation());
+        
+        Box bb = sl::boundingBox(sh);
+        
         Vertex ci, cb;
         auto bbin = sl::boundingBox(bin_);
 

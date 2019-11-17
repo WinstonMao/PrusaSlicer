@@ -160,6 +160,14 @@ public:
 		                m_show_modified_btns = show;
     }
 
+    void            clear_fields_except_of(const std::vector<std::string> left_fields);
+
+    void            hide_labels() {
+        label_width = 0;
+        m_grid_sizer->SetCols(m_grid_sizer->GetEffectiveColsCount()-1);
+        static_cast<wxFlexGridSizer*>(m_grid_sizer)->AddGrowableCol(!extra_column ? 0 : 1);
+    }
+
 	OptionsGroup(	wxWindow* _parent, const wxString& title, bool is_tab_opt = false, 
 					column_t extra_clmn = nullptr) :
 					m_parent(_parent), title(title), 
@@ -167,7 +175,7 @@ public:
 					staticbox(title!=""), extra_column(extra_clmn) {
         if (staticbox) {
             stb = new wxStaticBox(_parent, wxID_ANY, title);
-            stb->SetBackgroundStyle(wxBG_STYLE_PAINT);
+            if (!wxOSX) stb->SetBackgroundStyle(wxBG_STYLE_PAINT);
             stb->SetFont(wxGetApp().bold_font());
         } else
         	stb = nullptr;
@@ -242,6 +250,9 @@ public:
 	Option		get_option(const std::string& opt_key, int opt_index = -1);
 	Line		create_single_option_line(const std::string& title, int idx = -1) /*const*/{
 		Option option = get_option(title, idx);
+		return OptionsGroup::create_single_option_line(option);
+	}
+	Line		create_single_option_line(const Option& option) const {
 		return OptionsGroup::create_single_option_line(option);
 	}
 	void		append_single_option_line(const Option& option)	{

@@ -84,7 +84,7 @@ public:
 
     // Set the step as started. Block on mutex while the Print / PrintObject / PrintRegion objects are being
     // modified by the UI thread.
-    // This is necessary to block until the Print::apply_config() updates its state, which may
+    // This is necessary to block until the Print::apply() updates its state, which may
     // influence the processing step being entered.
     template<typename ThrowIfCanceled>
     bool set_started(StepType step, tbb::mutex &mtx, ThrowIfCanceled throw_if_canceled) {
@@ -217,7 +217,7 @@ protected:
 class PrintBase
 {
 public:
-	PrintBase() { this->restart(); }
+	PrintBase() : m_placeholder_parser(&m_full_print_config) { this->restart(); }
     inline virtual ~PrintBase() {}
 
     virtual PrinterTechnology technology() const noexcept = 0;
@@ -240,13 +240,13 @@ public:
         // Some data was changed, which in turn invalidated already calculated steps.
         APPLY_STATUS_INVALIDATED,
     };
-    virtual ApplyStatus     apply(const Model &model, const DynamicPrintConfig &config) = 0;
+    virtual ApplyStatus     apply(const Model &model, DynamicPrintConfig config) = 0;
     const Model&            model() const { return m_model; }
 
     struct TaskParams {
 		TaskParams() : single_model_object(0), single_model_instance_only(false), to_object_step(-1), to_print_step(-1) {}
         // If non-empty, limit the processing to this ModelObject.
-        ModelID                 single_model_object;
+        ObjectID                single_model_object;
 		// If set, only process single_model_object. Otherwise process everything, but single_model_object first.
 		bool					single_model_instance_only;
         // If non-negative, stop processing at the successive object step.
@@ -268,8 +268,7 @@ public:
         std::string     text;
         // Bitmap of flags.
         enum FlagBits {
-            DEFAULT,
-            NO_RELOAD_SCENE                 = 0,
+            DEFAULT                         = 0,
             RELOAD_SCENE                    = 1 << 1,
             RELOAD_SLA_SUPPORT_POINTS       = 1 << 2,
             RELOAD_SLA_PREVIEW              = 1 << 3,
@@ -316,10 +315,12 @@ public:
     virtual bool               finished() const = 0;
 
     const PlaceholderParser&   placeholder_parser() const { return m_placeholder_parser; }
-    PlaceholderParser&         placeholder_parser() { return m_placeholder_parser; }
+    const DynamicPrintConfig&  full_print_config() const { return m_full_print_config; }
 
-    virtual std::string        output_filename() const = 0;
-    std::string                output_filepath(const std::string &path) const;
+    virtual std::string        output_filename(const std::string &filename_base = std::string()) const = 0;
+    // If the filename_base is set, it is used as the input for the template processing. In that case the path is expected to be the directory (may be empty).
+    // If filename_set is empty, than the path may be a file or directory. If it is a file, then the macro will not be processed.
+    std::string                output_filepath(const std::string &path, const std::string &filename_base = std::string()) const;
 
 protected:
 	friend class PrintObjectBase;
@@ -334,11 +335,13 @@ protected:
     void                   throw_if_canceled() const { if (m_cancel_status) throw CanceledException(); }
 
     // To be called by this->output_filename() with the format string pulled from the configuration layer.
-    std::string            output_filename(const std::string &format, const std::string &default_ext, const DynamicConfig *config_override = nullptr) const;
+    std::string            output_filename(const std::string &format, const std::string &default_ext, const std::string &filename_base, const DynamicConfig *config_override = nullptr) const;
     // Update "scale", "input_filename", "input_filename_base" placeholders from the current printable ModelObjects.
-    void                   update_object_placeholders(DynamicConfig &config) const;
+    void                   update_object_placeholders(DynamicConfig &config, const std::string &default_ext) const;
 
 	Model                                   m_model;
+	DynamicPrintConfig						m_full_print_config;
+    PlaceholderParser                       m_placeholder_parser;
 
 private:
     tbb::atomic<CancelStatus>               m_cancel_status;
@@ -352,8 +355,6 @@ private:
     // The mutex will be used to guard the worker thread against entering a stage
     // while the data influencing the stage is modified.
     mutable tbb::mutex                      m_state_mutex;
-
-    PlaceholderParser                       m_placeholder_parser;
 };
 
 template<typename PrintStepEnum, const size_t COUNT>

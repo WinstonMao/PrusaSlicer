@@ -36,6 +36,12 @@ set(DESTDIR "${CMAKE_CURRENT_BINARY_DIR}/destdir" CACHE PATH "Destination direct
 option(DEP_DEBUG "Build debug variants (only applicable on Windows)" ON)
 option(DEP_WX_STABLE "Build against wxWidgets stable 3.0 as opposed to default 3.1 (Linux only)" OFF)
 
+# On developer machines, it can be enabled to speed up compilation and suppress warnings coming from IGL. 
+# FIXME:
+# Enabling this option is not safe. IGL will compile itself with its own version of Eigen while
+# Slic3r compiles with a different version which will cause runtime errors.
+# option(DEP_BUILD_IGL_STATIC "Build IGL as a static library. Might cause link errors and increase binary size." OFF)
+
 message(STATUS "PrusaSlicer deps DESTDIR: ${DESTDIR}")
 message(STATUS "PrusaSlicer deps debug build: ${DEP_DEBUG}")
 
@@ -66,11 +72,14 @@ elseif (APPLE)
             message(FATAL_ERROR "Could not determine OS X SDK version. Please use -DCMAKE_OSX_DEPLOYMENT_TARGET=<version>")
         endif ()
 
-        message("OS X Deployment Target (inferred from default): ${DEP_OSX_TARGET}")
+        message("OS X Deployment Target (inferred from SDK): ${DEP_OSX_TARGET}")
     endif ()
 
     include("deps-macos.cmake")
-else ()
+elseif (MINGW)
+    message(STATUS "Building for MinGW...")
+    include("deps-mingw.cmake")
+else()
     include("deps-linux.cmake")
 endif()
 
@@ -83,8 +92,11 @@ if (MSVC)
         dep_libcurl
         dep_wxwidgets
         dep_gtest
+        dep_cereal
         dep_nlopt
+        # dep_qhull # Experimental
         dep_zlib    # on Windows we still need zlib
+        dep_openvdb
     )
 
 else()
@@ -96,7 +108,11 @@ else()
         dep_libcurl
         dep_wxwidgets
         dep_gtest
+        dep_cereal
         dep_nlopt
+        dep_qhull
+        dep_openvdb
+        # dep_libigl # Not working, static build has different Eigen
     )
 
 endif()

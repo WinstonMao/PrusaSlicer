@@ -1,6 +1,7 @@
 #ifndef ZIPPER_HPP
 #define ZIPPER_HPP
 
+#include <cstdint>
 #include <string>
 #include <memory>
 
@@ -82,6 +83,8 @@ public:
     void finish_entry();
 
     void finalize();
+
+    const std::string & get_filename() const;
 };
 
 

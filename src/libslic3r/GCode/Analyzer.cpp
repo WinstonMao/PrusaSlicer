@@ -7,6 +7,8 @@
 #include "../Utils.hpp"
 #include "Print.hpp"
 
+#include <boost/log/trivial.hpp>
+
 #include "Analyzer.hpp"
 #include "PreviewData.hpp"
 
@@ -18,6 +20,7 @@ static const unsigned int DEFAULT_EXTRUDER_ID = 0;
 static const unsigned int DEFAULT_COLOR_PRINT_ID = 0;
 static const Slic3r::Vec3d DEFAULT_START_POSITION = Slic3r::Vec3d(0.0f, 0.0f, 0.0f);
 static const float DEFAULT_START_EXTRUSION = 0.0f;
+static const float DEFAULT_FAN_SPEED = 0.0f;
 
 namespace Slic3r {
 
@@ -25,6 +28,7 @@ const std::string GCodeAnalyzer::Extrusion_Role_Tag = "_ANALYZER_EXTR_ROLE:";
 const std::string GCodeAnalyzer::Mm3_Per_Mm_Tag = "_ANALYZER_MM3_PER_MM:";
 const std::string GCodeAnalyzer::Width_Tag = "_ANALYZER_WIDTH:";
 const std::string GCodeAnalyzer::Height_Tag = "_ANALYZER_HEIGHT:";
+const std::string GCodeAnalyzer::Color_Change_Tag = "_ANALYZER_COLOR_CHANGE";
 
 const double GCodeAnalyzer::Default_mm3_per_mm = 0.0;
 const float GCodeAnalyzer::Default_Width = 0.0f;
@@ -33,21 +37,23 @@ const float GCodeAnalyzer::Default_Height = 0.0f;
 GCodeAnalyzer::Metadata::Metadata()
     : extrusion_role(erNone)
     , extruder_id(DEFAULT_EXTRUDER_ID)
-    , cp_color_id(DEFAULT_COLOR_PRINT_ID)
     , mm3_per_mm(GCodeAnalyzer::Default_mm3_per_mm)
     , width(GCodeAnalyzer::Default_Width)
     , height(GCodeAnalyzer::Default_Height)
     , feedrate(DEFAULT_FEEDRATE)
+    , fan_speed(DEFAULT_FAN_SPEED)
+    , cp_color_id(DEFAULT_COLOR_PRINT_ID)
 {
 }
 
-GCodeAnalyzer::Metadata::Metadata(ExtrusionRole extrusion_role, unsigned int extruder_id, double mm3_per_mm, float width, float height, float feedrate, unsigned int cp_color_id/* = 0*/)
+GCodeAnalyzer::Metadata::Metadata(ExtrusionRole extrusion_role, unsigned int extruder_id, double mm3_per_mm, float width, float height, float feedrate, float fan_speed, unsigned int cp_color_id/* = 0*/)
     : extrusion_role(extrusion_role)
     , extruder_id(extruder_id)
     , mm3_per_mm(mm3_per_mm)
     , width(width)
     , height(height)
     , feedrate(feedrate)
+    , fan_speed(fan_speed)
     , cp_color_id(cp_color_id)
 {
 }
@@ -72,15 +78,18 @@ bool GCodeAnalyzer::Metadata::operator != (const GCodeAnalyzer::Metadata& other)
     if (feedrate != other.feedrate)
         return true;
 
+    if (fan_speed != other.fan_speed)
+        return true;
+
     if (cp_color_id != other.cp_color_id)
         return true;
 
     return false;
 }
 
-GCodeAnalyzer::GCodeMove::GCodeMove(GCodeMove::EType type, ExtrusionRole extrusion_role, unsigned int extruder_id, double mm3_per_mm, float width, float height, float feedrate, const Vec3d& start_position, const Vec3d& end_position, float delta_extruder, unsigned int cp_color_id/* = 0*/)
+GCodeAnalyzer::GCodeMove::GCodeMove(GCodeMove::EType type, ExtrusionRole extrusion_role, unsigned int extruder_id, double mm3_per_mm, float width, float height, float feedrate, const Vec3d& start_position, const Vec3d& end_position, float delta_extruder, float fan_speed, unsigned int cp_color_id/* = 0*/)
     : type(type)
-    , data(extrusion_role, extruder_id, mm3_per_mm, width, height, feedrate, cp_color_id)
+    , data(extrusion_role, extruder_id, mm3_per_mm, width, height, feedrate, fan_speed, cp_color_id)
     , start_position(start_position)
     , end_position(end_position)
     , delta_extruder(delta_extruder)
@@ -106,6 +115,16 @@ void GCodeAnalyzer::set_extruder_offsets(const GCodeAnalyzer::ExtruderOffsetsMap
     m_extruder_offsets = extruder_offsets;
 }
 
+void GCodeAnalyzer::set_extruders_count(unsigned int count)
+{
+    m_extruders_count = count;
+}
+
+void GCodeAnalyzer::set_gcode_flavor(const GCodeFlavor& flavor)
+{
+    m_gcode_flavor = flavor;
+}
+
 void GCodeAnalyzer::reset()
 {
     _set_units(Millimeters);
@@ -120,10 +139,14 @@ void GCodeAnalyzer::reset()
     _set_feedrate(DEFAULT_FEEDRATE);
     _set_start_position(DEFAULT_START_POSITION);
     _set_start_extrusion(DEFAULT_START_EXTRUSION);
+    _set_fan_speed(DEFAULT_FAN_SPEED);
     _reset_axes_position();
+    _reset_axes_origin();
+    _reset_cached_position();
 
     m_moves_map.clear();
     m_extruder_offsets.clear();
+    m_extruders_count = 1;
 }
 
 const std::string& GCodeAnalyzer::process_gcode(const std::string& gcode)
@@ -234,11 +257,6 @@ void GCodeAnalyzer::_process_gcode_line(GCodeReader&, const GCodeReader::GCodeLi
             {
                 switch (::atoi(&cmd[1]))
                 {
-                case 600: // Set color change
-                    {
-                        _processM600(line);
-                        break;
-                    }
                 case 82: // Set extruder to absolute mode
                     {
                         _processM82(line);
@@ -247,6 +265,39 @@ void GCodeAnalyzer::_process_gcode_line(GCodeReader&, const GCodeReader::GCodeLi
                 case 83: // Set extruder to relative mode
                     {
                         _processM83(line);
+                        break;
+                    }
+                case 106: // Set fan speed
+                    {
+                        _processM106(line);
+                        break;
+                    }
+                case 107: // Disable fan
+                    {
+                        _processM107(line);
+                        break;
+                    }
+                case 108:
+                case 135:
+                    {
+                        // these are used by MakerWare and Sailfish firmwares
+                        // for tool changing - we can process it in one place
+                        _processM108orM135(line);
+                        break;
+                    }
+                case 132: // Recall stored home offsets
+                    {
+                        _processM132(line);
+                        break;
+                    }
+                case 401: // Repetier: Store x, y and z position
+                    {
+                        _processM401(line);
+                        break;
+                    }
+                case 402: // Repetier: Go to stored position
+                    {
+                        _processM402(line);
                         break;
                     }
                 }
@@ -265,31 +316,32 @@ void GCodeAnalyzer::_process_gcode_line(GCodeReader&, const GCodeReader::GCodeLi
     m_process_output += line.raw() + "\n";
 }
 
-// Returns the new absolute position on the given axis in dependence of the given parameters
-float axis_absolute_position_from_G1_line(GCodeAnalyzer::EAxis axis, const GCodeReader::GCodeLine& lineG1, GCodeAnalyzer::EUnits units, bool is_relative, float current_absolute_position)
-{
-    float lengthsScaleFactor = (units == GCodeAnalyzer::Inches) ? INCHES_TO_MM : 1.0f;
-    if (lineG1.has(Slic3r::Axis(axis)))
-    {
-        float ret = lineG1.value(Slic3r::Axis(axis)) * lengthsScaleFactor;
-        return is_relative ? current_absolute_position + ret : ret;
-    }
-    else
-        return current_absolute_position;
-}
-
 void GCodeAnalyzer::_processG1(const GCodeReader::GCodeLine& line)
 {
+    auto axis_absolute_position = [this](GCodeAnalyzer::EAxis axis, const GCodeReader::GCodeLine& lineG1) -> float
+    {
+        float current_absolute_position = _get_axis_position(axis);
+        float current_origin = _get_axis_origin(axis);
+        float lengthsScaleFactor = (_get_units() == GCodeAnalyzer::Inches) ? INCHES_TO_MM : 1.0f;
+
+        bool is_relative = (_get_global_positioning_type() == Relative);
+        if (axis == E)
+            is_relative |= (_get_e_local_positioning_type() == Relative);
+
+        if (lineG1.has(Slic3r::Axis(axis)))
+        {
+            float ret = lineG1.value(Slic3r::Axis(axis)) * lengthsScaleFactor;
+            return is_relative ? current_absolute_position + ret : ret + current_origin;
+        }
+        else
+            return current_absolute_position;
+    };
+
     // updates axes positions from line
-    EUnits units = _get_units();
     float new_pos[Num_Axis];
     for (unsigned char a = X; a < Num_Axis; ++a)
     {
-        bool is_relative = (_get_global_positioning_type() == Relative);
-        if (a == E)
-            is_relative |= (_get_e_local_positioning_type() == Relative);
-
-        new_pos[a] = axis_absolute_position_from_G1_line((EAxis)a, line, units, is_relative, _get_axis_position((EAxis)a));
+        new_pos[a] = axis_absolute_position((EAxis)a, line);
     }
 
     // updates feedrate from line, if present
@@ -379,25 +431,25 @@ void GCodeAnalyzer::_processG92(const GCodeReader::GCodeLine& line)
 
     if (line.has_x())
     {
-        _set_axis_position(X, line.x() * lengthsScaleFactor);
+        _set_axis_origin(X, _get_axis_position(X) - line.x() * lengthsScaleFactor);
         anyFound = true;
     }
 
     if (line.has_y())
     {
-        _set_axis_position(Y, line.y() * lengthsScaleFactor);
+        _set_axis_origin(Y, _get_axis_position(Y) - line.y() * lengthsScaleFactor);
         anyFound = true;
     }
 
     if (line.has_z())
     {
-        _set_axis_position(Z, line.z() * lengthsScaleFactor);
+        _set_axis_origin(Z, _get_axis_position(Z) - line.z() * lengthsScaleFactor);
         anyFound = true;
     }
 
     if (line.has_e())
     {
-        _set_axis_position(E, line.e() * lengthsScaleFactor);
+        _set_axis_origin(E, _get_axis_position(E) - line.e() * lengthsScaleFactor);
         anyFound = true;
     }
 
@@ -405,7 +457,7 @@ void GCodeAnalyzer::_processG92(const GCodeReader::GCodeLine& line)
     {
         for (unsigned char a = X; a < Num_Axis; ++a)
         {
-            _set_axis_position((EAxis)a, 0.0f);
+            _set_axis_origin((EAxis)a, _get_axis_position((EAxis)a));
         }
     }
 }
@@ -420,26 +472,140 @@ void GCodeAnalyzer::_processM83(const GCodeReader::GCodeLine& line)
     _set_e_local_positioning_type(Relative);
 }
 
-void GCodeAnalyzer::_processM600(const GCodeReader::GCodeLine& line)
+void GCodeAnalyzer::_processM106(const GCodeReader::GCodeLine& line)
 {
-    m_state.cur_cp_color_id++;
-    _set_cp_color_id(m_state.cur_cp_color_id);
+    if (!line.has('P'))
+    {
+        // The absence of P means the print cooling fan, so ignore anything else.
+        float new_fan_speed;
+        if (line.has_value('S', new_fan_speed))
+            _set_fan_speed((100.0f / 256.0f) * new_fan_speed);
+        else
+            _set_fan_speed(100.0f);
+    }
 }
 
-void GCodeAnalyzer::_processT(const GCodeReader::GCodeLine& line)
+void GCodeAnalyzer::_processM107(const GCodeReader::GCodeLine& line)
 {
-    std::string cmd = line.cmd();
+    _set_fan_speed(0.0f);
+}
+
+void GCodeAnalyzer::_processM108orM135(const GCodeReader::GCodeLine& line)
+{
+    // These M-codes are used by MakerWare and Sailfish to change active tool.
+    // They have to be processed otherwise toolchanges will be unrecognised
+    // by the analyzer - see https://github.com/prusa3d/PrusaSlicer/issues/2566
+
+    size_t code = ::atoi(&(line.cmd()[1]));
+    if ((code == 108 && m_gcode_flavor == gcfSailfish)
+        || (code == 135 && m_gcode_flavor == gcfMakerWare)) {
+
+        std::string cmd = line.raw();
+        size_t T_pos = cmd.find("T");
+        if (T_pos != std::string::npos) {
+            cmd = cmd.substr(T_pos);
+            _processT(cmd);
+        }
+    }
+}
+
+void GCodeAnalyzer::_processM132(const GCodeReader::GCodeLine& line)
+{
+    // This command is used by Makerbot to load the current home position from EEPROM
+    // see: https://github.com/makerbot/s3g/blob/master/doc/GCodeProtocol.md
+    // Using this command to reset the axis origin to zero helps in fixing: https://github.com/prusa3d/PrusaSlicer/issues/3082
+
+    if (line.has_x())
+        _set_axis_origin(X, 0.0f);
+
+    if (line.has_y())
+        _set_axis_origin(Y, 0.0f);
+
+    if (line.has_z())
+        _set_axis_origin(Z, 0.0f);
+
+    if (line.has_e())
+        _set_axis_origin(E, 0.0f);
+}
+
+void GCodeAnalyzer::_processM401(const GCodeReader::GCodeLine& line)
+{
+    if (m_gcode_flavor != gcfRepetier)
+        return;
+
+    for (unsigned char a = 0; a <= 3; ++a)
+    {
+        _set_cached_position(a, _get_axis_position((EAxis)a));
+    }
+    _set_cached_position(4, _get_feedrate());
+}
+
+void GCodeAnalyzer::_processM402(const GCodeReader::GCodeLine& line)
+{
+    if (m_gcode_flavor != gcfRepetier)
+        return;
+
+    // see for reference:
+    // https://github.com/repetier/Repetier-Firmware/blob/master/src/ArduinoAVR/Repetier/Printer.cpp
+    // void Printer::GoToMemoryPosition(bool x, bool y, bool z, bool e, float feed)
+
+    bool has_xyz = !(line.has_x() || line.has_y() || line.has_z());
+
+    float p = FLT_MAX;
+    for (unsigned char a = X; a <= Z; ++a)
+    {
+        if (has_xyz || line.has(a))
+        {
+            p = _get_cached_position(a);
+            if (p != FLT_MAX)
+                _set_axis_position((EAxis)a, p);
+        }
+    }
+
+    p = _get_cached_position(E);
+    if (p != FLT_MAX)
+        _set_axis_position(E, p);
+
+    p = FLT_MAX;
+    if (!line.has_value(4, p))
+        p = _get_cached_position(4);
+
+    if (p != FLT_MAX)
+        _set_feedrate(p);
+}
+
+void GCodeAnalyzer::_reset_cached_position()
+{
+    for (unsigned char a = 0; a <= 4; ++a)
+    {
+        m_state.cached_position[a] = FLT_MAX;
+    }
+}
+
+void GCodeAnalyzer::_processT(const std::string& cmd)
+{
     if (cmd.length() > 1)
     {
         unsigned int id = (unsigned int)::strtol(cmd.substr(1).c_str(), nullptr, 10);
         if (_get_extruder_id() != id)
         {
-            _set_extruder_id(id);
+            if (id >= m_extruders_count)
+            {
+                if (m_extruders_count > 1)
+                    BOOST_LOG_TRIVIAL(error) << "GCodeAnalyzer encountered an invalid toolchange, maybe from a custom gcode.";
+            }
+            else
+                _set_extruder_id(id);
 
             // stores tool change move
             _store_move(GCodeMove::Tool_change);
         }
     }
+}
+
+void GCodeAnalyzer::_processT(const GCodeReader::GCodeLine& line)
+{
+    _processT(line.cmd());
 }
 
 bool GCodeAnalyzer::_process_tags(const GCodeReader::GCodeLine& line)
@@ -478,6 +644,14 @@ bool GCodeAnalyzer::_process_tags(const GCodeReader::GCodeLine& line)
         return true;
     }
 
+    // color change tag
+    pos = comment.find(Color_Change_Tag);
+    if (pos != comment.npos)
+    {
+        _process_color_change_tag();
+        return true;
+    }
+
     return false;
 }
 
@@ -505,6 +679,12 @@ void GCodeAnalyzer::_process_width_tag(const std::string& comment, size_t pos)
 void GCodeAnalyzer::_process_height_tag(const std::string& comment, size_t pos)
 {
     _set_height((float)::strtod(comment.substr(pos + Height_Tag.length()).c_str(), nullptr));
+}
+
+void GCodeAnalyzer::_process_color_change_tag()
+{
+    m_state.cur_cp_color_id++;
+    _set_cp_color_id(m_state.cur_cp_color_id);
 }
 
 void GCodeAnalyzer::_set_units(GCodeAnalyzer::EUnits units)
@@ -607,6 +787,16 @@ float GCodeAnalyzer::_get_feedrate() const
     return m_state.data.feedrate;
 }
 
+void GCodeAnalyzer::_set_fan_speed(float fan_speed_percentage)
+{
+    m_state.data.fan_speed = fan_speed_percentage;
+}
+
+float GCodeAnalyzer::_get_fan_speed() const
+{
+    return m_state.data.fan_speed;
+}
+
 void GCodeAnalyzer::_set_axis_position(EAxis axis, float position)
 {
     m_state.position[axis] = position;
@@ -617,9 +807,24 @@ float GCodeAnalyzer::_get_axis_position(EAxis axis) const
     return m_state.position[axis];
 }
 
+void GCodeAnalyzer::_set_axis_origin(EAxis axis, float position)
+{
+    m_state.origin[axis] = position;
+}
+
+float GCodeAnalyzer::_get_axis_origin(EAxis axis) const
+{
+    return m_state.origin[axis];
+}
+
 void GCodeAnalyzer::_reset_axes_position()
 {
     ::memset((void*)m_state.position, 0, Num_Axis * sizeof(float));
+}
+
+void GCodeAnalyzer::_reset_axes_origin()
+{
+    ::memset((void*)m_state.origin, 0, Num_Axis * sizeof(float));
 }
 
 void GCodeAnalyzer::_set_start_position(const Vec3d& position)
@@ -630,6 +835,17 @@ void GCodeAnalyzer::_set_start_position(const Vec3d& position)
 const Vec3d& GCodeAnalyzer::_get_start_position() const
 {
     return m_state.start_position;
+}
+
+void GCodeAnalyzer::_set_cached_position(unsigned char axis, float position)
+{
+    if ((0 <= axis) || (axis <= 4))
+        m_state.cached_position[axis] = position;
+}
+
+float GCodeAnalyzer::_get_cached_position(unsigned char axis) const
+{
+    return ((0 <= axis) || (axis <= 4)) ? m_state.cached_position[axis] : FLT_MAX;
 }
 
 void GCodeAnalyzer::_set_start_extrusion(float extrusion)
@@ -668,7 +884,7 @@ void GCodeAnalyzer::_store_move(GCodeAnalyzer::GCodeMove::EType type)
 
     Vec3d start_position = _get_start_position() + extruder_offset;
     Vec3d end_position = _get_end_position() + extruder_offset;
-    it->second.emplace_back(type, _get_extrusion_role(), extruder_id, _get_mm3_per_mm(), _get_width(), _get_height(), _get_feedrate(), start_position, end_position, _get_delta_extrusion(), _get_cp_color_id());
+    it->second.emplace_back(type, _get_extrusion_role(), extruder_id, _get_mm3_per_mm(), _get_width(), _get_height(), _get_feedrate(), start_position, end_position, _get_delta_extrusion(), _get_fan_speed(), _get_cp_color_id());
 }
 
 bool GCodeAnalyzer::_is_valid_extrusion_role(int value) const
@@ -691,7 +907,7 @@ void GCodeAnalyzer::_calc_gcode_preview_extrusion_layers(GCodePreviewData& previ
             }
 
             // if layer not found, create and return it
-            layers.emplace_back(z, ExtrusionPaths());
+            layers.emplace_back(z, GCodePreviewData::Extrusion::Paths());
             return layers.back();
         }
 
@@ -700,13 +916,18 @@ void GCodeAnalyzer::_calc_gcode_preview_extrusion_layers(GCodePreviewData& previ
             // if the polyline is valid, create the extrusion path from it and store it
             if (polyline.is_valid())
             {
-                ExtrusionPath path(data.extrusion_role, data.mm3_per_mm, data.width, data.height);
+				auto& paths = get_layer_at_z(preview_data.extrusion.layers, z).paths;
+				paths.emplace_back(GCodePreviewData::Extrusion::Path());
+				GCodePreviewData::Extrusion::Path &path = paths.back();
                 path.polyline = polyline;
+				path.extrusion_role = data.extrusion_role;
+				path.mm3_per_mm = data.mm3_per_mm;
+				path.width = data.width;
+				path.height = data.height;
                 path.feedrate = data.feedrate;
                 path.extruder_id = data.extruder_id;
                 path.cp_color_id = data.cp_color_id;
-
-                get_layer_at_z(preview_data.extrusion.layers, z).paths.push_back(path);
+                path.fan_speed = data.fan_speed;
             }
         }
     };
@@ -724,6 +945,7 @@ void GCodeAnalyzer::_calc_gcode_preview_extrusion_layers(GCodePreviewData& previ
     GCodePreviewData::Range width_range;
     GCodePreviewData::Range feedrate_range;
     GCodePreviewData::Range volumetric_rate_range;
+    GCodePreviewData::Range fan_speed_range;
 
     // to avoid to call the callback too often
     unsigned int cancel_callback_threshold = (unsigned int)std::max((int)extrude_moves->second.size() / 25, 1);
@@ -758,6 +980,7 @@ void GCodeAnalyzer::_calc_gcode_preview_extrusion_layers(GCodePreviewData& previ
             width_range.update_from(move.data.width);
             feedrate_range.update_from(move.data.feedrate);
             volumetric_rate_range.update_from(volumetric_rate);
+            fan_speed_range.update_from(move.data.fan_speed);
         }
         else
             // append end vertex of the move to current polyline
@@ -776,6 +999,7 @@ void GCodeAnalyzer::_calc_gcode_preview_extrusion_layers(GCodePreviewData& previ
     preview_data.ranges.width.update_from(width_range);
     preview_data.ranges.feedrate.update_from(feedrate_range);
     preview_data.ranges.volumetric_rate.update_from(volumetric_rate_range);
+    preview_data.ranges.fan_speed.update_from(fan_speed_range);
 
     // we need to sort the layers by their z as they can be shuffled in case of sequential prints
     std::sort(preview_data.extrusion.layers.begin(), preview_data.extrusion.layers.end(), [](const GCodePreviewData::Extrusion::Layer& l1, const GCodePreviewData::Extrusion::Layer& l2)->bool { return l1.z < l2.z; });
@@ -833,12 +1057,12 @@ void GCodeAnalyzer::_calc_gcode_preview_travel(GCodePreviewData& preview_data, s
             polyline = Polyline3();
 
             // add both vertices of the move
-            polyline.append(Vec3crd(scale_(move.start_position.x()), scale_(move.start_position.y()), scale_(move.start_position.z())));
-            polyline.append(Vec3crd(scale_(move.end_position.x()), scale_(move.end_position.y()), scale_(move.end_position.z())));
+            polyline.append(Vec3crd((int)scale_(move.start_position.x()), (int)scale_(move.start_position.y()), (int)scale_(move.start_position.z())));
+            polyline.append(Vec3crd((int)scale_(move.end_position.x()), (int)scale_(move.end_position.y()), (int)scale_(move.end_position.z())));
         }
         else
             // append end vertex of the move to current polyline
-            polyline.append(Vec3crd(scale_(move.end_position.x()), scale_(move.end_position.y()), scale_(move.end_position.z())));
+            polyline.append(Vec3crd((int)scale_(move.end_position.x()), (int)scale_(move.end_position.y()), (int)scale_(move.end_position.z())));
 
         // update current values
         position = move.end_position;
@@ -882,7 +1106,7 @@ void GCodeAnalyzer::_calc_gcode_preview_retractions(GCodePreviewData& preview_da
             cancel_callback();
 
         // store position
-        Vec3crd position(scale_(move.start_position.x()), scale_(move.start_position.y()), scale_(move.start_position.z()));
+        Vec3crd position((int)scale_(move.start_position.x()), (int)scale_(move.start_position.y()), (int)scale_(move.start_position.z()));
         preview_data.retraction.positions.emplace_back(position, move.data.width, move.data.height);
     }
 
@@ -909,7 +1133,7 @@ void GCodeAnalyzer::_calc_gcode_preview_unretractions(GCodePreviewData& preview_
             cancel_callback();
 
         // store position
-        Vec3crd position(scale_(move.start_position.x()), scale_(move.start_position.y()), scale_(move.start_position.z()));
+        Vec3crd position((int)scale_(move.start_position.x()), (int)scale_(move.start_position.y()), (int)scale_(move.start_position.z()));
         preview_data.unretraction.positions.emplace_back(position, move.data.width, move.data.height);
     }
 

@@ -7,9 +7,15 @@
 #include "Polygon.hpp"
 #include "Polyline.hpp"
 
+// Serialization through the Cereal library
+#include <cereal/access.hpp>
+
 #include "boost/polygon/voronoi.hpp"
-using boost::polygon::voronoi_builder;
-using boost::polygon::voronoi_diagram;
+
+namespace ClipperLib {
+class PolyNode;
+using PolyNodes = std::vector<PolyNode*>;
+}
 
 namespace Slic3r { namespace Geometry {
 
@@ -108,13 +114,33 @@ inline bool segment_segment_intersection(const Vec2d &p1, const Vec2d &v1, const
     return true;
 }
 
+
+inline int segments_could_intersect(
+	const Slic3r::Point &ip1, const Slic3r::Point &ip2, 
+	const Slic3r::Point &jp1, const Slic3r::Point &jp2)
+{
+	Vec2i64 iv   = (ip2 - ip1).cast<int64_t>();
+	Vec2i64 vij1 = (jp1 - ip1).cast<int64_t>();
+	Vec2i64 vij2 = (jp2 - ip1).cast<int64_t>();
+	int64_t tij1 = cross2(iv, vij1);
+	int64_t tij2 = cross2(iv, vij2);
+	int     sij1 = (tij1 > 0) ? 1 : ((tij1 < 0) ? -1 : 0); // signum
+	int     sij2 = (tij2 > 0) ? 1 : ((tij2 < 0) ? -1 : 0);
+	return sij1 * sij2;
+}
+
+inline bool segments_intersect(
+	const Slic3r::Point &ip1, const Slic3r::Point &ip2, 
+	const Slic3r::Point &jp1, const Slic3r::Point &jp2)
+{
+	return segments_could_intersect(ip1, ip2, jp1, jp2) <= 0 && 
+		   segments_could_intersect(jp1, jp2, ip1, ip2) <= 0;
+}
+
 Pointf3s convex_hull(Pointf3s points);
 Polygon convex_hull(Points points);
 Polygon convex_hull(const Polygons &polygons);
 
-void chained_path(const Points &points, std::vector<Points::size_type> &retval, Point start_near);
-void chained_path(const Points &points, std::vector<Points::size_type> &retval);
-template<class T> void chained_path_items(Points &points, T &items, T &retval);
 bool directions_parallel(double angle1, double angle2, double max_diff = 0);
 template<class T> bool contains(const std::vector<T> &vector, const Point &point);
 template<typename T> T rad2deg(T angle) { return T(180.0) * angle / T(PI); }
@@ -134,6 +160,15 @@ template<typename T> T angle_to_0_2PI(T angle)
 
     return angle;
 }
+
+/// Find the center of the circle corresponding to the vector of Points as an arc.
+Point circle_taubin_newton(const Points::const_iterator& input_start, const Points::const_iterator& input_end, size_t cycles = 20);
+inline Point circle_taubin_newton(const Points& input, size_t cycles = 20) { return circle_taubin_newton(input.cbegin(), input.cend(), cycles); }
+
+/// Find the center of the circle corresponding to the vector of Pointfs as an arc.
+Vec2d circle_taubin_newton(const Vec2ds::const_iterator& input_start, const Vec2ds::const_iterator& input_end, size_t cycles = 20);
+inline Vec2d circle_taubin_newton(const Vec2ds& input, size_t cycles = 20) { return circle_taubin_newton(input.cbegin(), input.cend(), cycles); }
+
 void simplify_polygons(const Polygons &polygons, double tolerance, Polygons* retval);
 
 double linint(double value, double oldmin, double oldmax, double newmin, double newmax);
@@ -155,7 +190,7 @@ class MedialAxis {
     void build(Polylines* polylines);
     
     private:
-    class VD : public voronoi_diagram<double> {
+    class VD : public boost::polygon::voronoi_diagram<double> {
     public:
         typedef double                                          coord_type;
         typedef boost::polygon::point_data<coordinate_type>     point_type;
@@ -252,14 +287,29 @@ public:
     void set_mirror(Axis axis, double mirror);
 
     void set_from_transform(const Transform3d& transform);
+    void set_from_string(const std::string& transform_str);
 
-#if ENABLE_VOLUMES_CENTERING_FIXES
     void reset();
-#endif // ENABLE_VOLUMES_CENTERING_FIXES
 
     const Transform3d& get_matrix(bool dont_translate = false, bool dont_rotate = false, bool dont_scale = false, bool dont_mirror = false) const;
 
     Transformation operator * (const Transformation& other) const;
+
+    // Find volume transformation, so that the chained (instance_trafo * volume_trafo) will be as close to identity
+    // as possible in least squares norm in regard to the 8 corners of bbox.
+    // Bounding box is expected to be centered around zero in all axes.
+    static Transformation volume_to_bed_transformation(const Transformation& instance_transformation, const BoundingBoxf3& bbox);
+
+private:
+	friend class cereal::access;
+	template<class Archive> void serialize(Archive & ar) { ar(m_offset, m_rotation, m_scaling_factor, m_mirror); }
+	explicit Transformation(int) : m_dirty(true) {}
+	template <class Archive> static void load_and_construct(Archive &ar, cereal::construct<Transformation> &construct)
+	{
+		// Calling a private constructor with special "int" parameter to indicate that no construction is necessary.
+		construct(1);
+		ar(construct.ptr()->m_offset, construct.ptr()->m_rotation, construct.ptr()->m_scaling_factor, construct.ptr()->m_mirror);
+	}
 };
 
 // Rotation when going from the first coordinate system with rotation rot_xyz_from applied

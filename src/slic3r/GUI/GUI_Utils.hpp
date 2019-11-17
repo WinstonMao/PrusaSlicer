@@ -34,6 +34,7 @@ void on_window_geometry(wxTopLevelWindow *tlw, std::function<void()> callback);
 enum { DPI_DEFAULT = 96 };
 
 int get_dpi_for_window(wxWindow *window);
+wxFont get_default_font_for_dpi(int dpi);
 
 struct DpiChangedEvent : public wxEvent {
     int dpi;
@@ -49,7 +50,7 @@ struct DpiChangedEvent : public wxEvent {
     }
 };
 
-wxDECLARE_EVENT(EVT_DPI_CHANGED, DpiChangedEvent);
+wxDECLARE_EVENT(EVT_DPI_CHANGED_SLICER, DpiChangedEvent);
 
 template<class P> class DPIAware : public P
 {
@@ -58,20 +59,26 @@ public:
         const wxSize &size=wxDefaultSize, long style=wxDEFAULT_FRAME_STYLE, const wxString &name=wxFrameNameStr)
         : P(parent, id, title, pos, size, style, name)
     {
-        m_scale_factor = (float)get_dpi_for_window(this) / (float)DPI_DEFAULT;
+        int dpi = get_dpi_for_window(this);
+        m_scale_factor = (float)dpi / (float)DPI_DEFAULT;
         m_prev_scale_factor = m_scale_factor;
-		float scale_primary_display = (float)get_dpi_for_window(nullptr) / (float)DPI_DEFAULT;
-		m_normal_font = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
-		if (std::abs(m_scale_factor - scale_primary_display) > 1e-6)
-			m_normal_font = m_normal_font.Scale(m_scale_factor / scale_primary_display);
+		m_normal_font = get_default_font_for_dpi(dpi);
 
-        // An analog of em_unit value from GUI_App.
-        m_em_unit = std::max<size_t>(10, 10 * m_scale_factor);
+        /* Because of default window font is a primary display font, 
+         * We should set correct font for window before getting em_unit value.
+         */
+#ifndef __WXOSX__ // Don't call SetFont under OSX to avoid name cutting in ObjectList 
+        this->SetFont(m_normal_font);
+#endif
+        // initialize default width_unit according to the width of the one symbol ("m") of the currently active font of this window.
+        m_em_unit = std::max<size_t>(10, this->GetTextExtent("m").x - 1);
 
 //        recalc_font();
 
-        this->Bind(EVT_DPI_CHANGED, [this](const DpiChangedEvent &evt) {
+        this->Bind(EVT_DPI_CHANGED_SLICER, [this](const DpiChangedEvent &evt) {
             m_scale_factor = (float)evt.dpi / (float)DPI_DEFAULT;
+
+            m_new_font_point_size = get_default_font_for_dpi(evt.dpi).GetPointSize();
 
             if (!m_can_rescale)
                 return;
@@ -125,6 +132,8 @@ private:
     float m_prev_scale_factor;
     bool  m_can_rescale{ true };
 
+    int   m_new_font_point_size;
+
 //    void recalc_font()
 //    {
 //        wxClientDC dc(this);
@@ -136,14 +145,22 @@ private:
     // check if new scale is differ from previous
     bool    is_new_scale_factor() const { return fabs(m_scale_factor - m_prev_scale_factor) > 0.001; }
 
+    // function for a font scaling of the window
+    void    scale_win_font(wxWindow *window, const int font_point_size)
+    {
+        wxFont new_font(window->GetFont());
+        new_font.SetPointSize(font_point_size);
+        window->SetFont(new_font);
+    }
+
     // recursive function for scaling fonts for all controls in Window
-    void    scale_controls_fonts(wxWindow *window, const float scale_f)
+    void    scale_controls_fonts(wxWindow *window, const int font_point_size)
     {
         auto children = window->GetChildren();
 
         for (auto child : children) {
-            scale_controls_fonts(child, scale_f);
-            child->SetFont(child->GetFont().Scaled(scale_f));
+            scale_controls_fonts(child, font_point_size);
+            scale_win_font(child, font_point_size);
         }
 
         window->Layout();
@@ -152,18 +169,18 @@ private:
     void    rescale(const wxRect &suggested_rect)
     {
         this->Freeze();
-        const float relative_scale_factor = m_scale_factor / m_prev_scale_factor;
 
         // rescale fonts of all controls
-        scale_controls_fonts(this, relative_scale_factor);
-        this->SetFont(this->GetFont().Scaled(relative_scale_factor));
+        scale_controls_fonts(this, m_new_font_point_size);
+        // rescale current window font
+        scale_win_font(this, m_new_font_point_size);
 
 
-        // rescale normal_font value
-        m_normal_font = m_normal_font.Scaled(relative_scale_factor);
+        // set normal application font as a current window font
+        m_normal_font = this->GetFont();
 
-        // An analog of em_unit value from GUI_App.
-        m_em_unit = std::max<size_t>(10, 10 * m_scale_factor);
+        // update em_unit value for new window font
+        m_em_unit = std::max<size_t>(10, this->GetTextExtent("m").x - 1);
 
         // rescale missed controls sizes and images
         on_dpi_changed(suggested_rect);

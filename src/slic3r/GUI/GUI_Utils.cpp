@@ -12,6 +12,8 @@
 #include <wx/sizer.h>
 #include <wx/checkbox.h>
 #include <wx/dcclient.h>
+#include <wx/font.h>
+#include <wx/fontutil.h>
 
 #include "libslic3r/Config.hpp"
 
@@ -53,14 +55,14 @@ void on_window_geometry(wxTopLevelWindow *tlw, std::function<void()> callback)
 #endif
 }
 
-wxDEFINE_EVENT(EVT_DPI_CHANGED, DpiChangedEvent);
+wxDEFINE_EVENT(EVT_DPI_CHANGED_SLICER, DpiChangedEvent);
 
 #ifdef _WIN32
 template<class F> typename F::FN winapi_get_function(const wchar_t *dll, const char *fn_name) {
     static HINSTANCE dll_handle = LoadLibraryExW(dll, nullptr, 0);
 
     if (dll_handle == nullptr) { return nullptr; }
-    return (F::FN)GetProcAddress(dll_handle, fn_name);
+    return (typename F::FN)GetProcAddress(dll_handle, fn_name);
 }
 #endif
 
@@ -113,6 +115,32 @@ int get_dpi_for_window(wxWindow *window)
 #endif
 }
 
+wxFont get_default_font_for_dpi(int dpi)
+{
+#ifdef _WIN32
+    // First try to load the font with the Windows 10 specific way.
+    struct SystemParametersInfoForDpi_t { typedef BOOL (WINAPI *FN)(UINT uiAction, UINT uiParam, PVOID pvParam, UINT fWinIni, UINT dpi); };
+    static auto SystemParametersInfoForDpi_fn = winapi_get_function<SystemParametersInfoForDpi_t>(L"User32.dll", "SystemParametersInfoForDpi");
+    if (SystemParametersInfoForDpi_fn != nullptr) {
+        NONCLIENTMETRICS nm;
+        memset(&nm, 0, sizeof(NONCLIENTMETRICS));
+        nm.cbSize = sizeof(NONCLIENTMETRICS);
+		if (SystemParametersInfoForDpi_fn(SPI_GETNONCLIENTMETRICS, sizeof(NONCLIENTMETRICS), &nm, 0, dpi)) {
+            wxNativeFontInfo info;
+            info.lf = nm.lfMessageFont;
+            return wxFont(info);
+        }
+    }
+    // Then try to guesstimate the font DPI scaling on Windows 8.
+    // Let's hope that the font returned by the SystemParametersInfo(), which is used by wxWidgets internally, makes sense.
+    int dpi_primary = get_dpi_for_window(nullptr);
+    if (dpi_primary != dpi) {
+        // Rescale the font.
+        return wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT).Scaled(float(dpi) / float(dpi_primary));
+    }
+#endif
+    return wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
+}
 
 CheckboxFileDialog::ExtraPanel::ExtraPanel(wxWindow *parent)
     : wxPanel(parent, wxID_ANY)

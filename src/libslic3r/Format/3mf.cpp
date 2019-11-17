@@ -3,25 +3,39 @@
 #include "../Utils.hpp"
 #include "../GCode.hpp"
 #include "../Geometry.hpp"
+#if ENABLE_THUMBNAIL_GENERATOR
+#include "../GCode/ThumbnailData.hpp"
+#endif // ENABLE_THUMBNAIL_GENERATOR
+
+#include "../I18N.hpp"
 
 #include "3mf.hpp"
 
 #include <limits>
+#include <stdexcept>
 
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/nowide/fstream.hpp>
+#include <boost/nowide/cstdio.hpp>
+
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/xml_parser.hpp>
+#include <boost/foreach.hpp>
+namespace pt = boost::property_tree;
 
 #include <expat.h>
 #include <Eigen/Dense>
-#include <miniz/miniz_zip.h>
+#include "miniz_extension.hpp"
 
 // VERSION NUMBERS
 // 0 : .3mf, files saved by older slic3r or other applications. No version definition in them.
 // 1 : Introduction of 3mf versioning. No other change in data saved into 3mf files.
-const unsigned int VERSION_3MF = 1;
+// 2 : Meshes saved in their local system; Volumes' matrices and source data added to Metadata/Slic3r_PE_model.config file.
+const unsigned int VERSION_3MF = 2;
 const char* SLIC3RPE_3MF_VERSION = "slic3rpe:Version3mf"; // definition of the metadata name saved into .model file
 
 const std::string MODEL_FOLDER = "3D/";
@@ -29,9 +43,13 @@ const std::string MODEL_EXTENSION = ".model";
 const std::string MODEL_FILE = "3D/3dmodel.model"; // << this is the only format of the string which works with CURA
 const std::string CONTENT_TYPES_FILE = "[Content_Types].xml";
 const std::string RELATIONSHIPS_FILE = "_rels/.rels";
+#if ENABLE_THUMBNAIL_GENERATOR
+const std::string THUMBNAIL_FILE = "Metadata/thumbnail.png";
+#endif // ENABLE_THUMBNAIL_GENERATOR
 const std::string PRINT_CONFIG_FILE = "Metadata/Slic3r_PE.config";
 const std::string MODEL_CONFIG_FILE = "Metadata/Slic3r_PE_model.config";
 const std::string LAYER_HEIGHTS_PROFILE_FILE = "Metadata/Slic3r_PE_layer_heights_profile.txt";
+const std::string LAYER_CONFIG_RANGES_FILE = "Metadata/Prusa_Slicer_layer_config_ranges.xml";
 const std::string SLA_SUPPORT_POINTS_FILE = "Metadata/Slic3r_PE_sla_support_points.txt";
 
 const char* MODEL_TAG = "model";
@@ -63,6 +81,7 @@ const char* V2_ATTR = "v2";
 const char* V3_ATTR = "v3";
 const char* OBJECTID_ATTR = "objectid";
 const char* TRANSFORM_ATTR = "transform";
+const char* PRINTABLE_ATTR = "printable";
 
 const char* KEY_ATTR = "key";
 const char* VALUE_ATTR = "value";
@@ -75,6 +94,13 @@ const char* VOLUME_TYPE = "volume";
 const char* NAME_KEY = "name";
 const char* MODIFIER_KEY = "modifier";
 const char* VOLUME_TYPE_KEY = "volume_type";
+const char* MATRIX_KEY = "matrix";
+const char* SOURCE_FILE_KEY = "source_file";
+const char* SOURCE_OBJECT_ID_KEY = "source_object_id";
+const char* SOURCE_VOLUME_ID_KEY = "source_volume_id";
+const char* SOURCE_OFFSET_X_KEY = "source_offset_x";
+const char* SOURCE_OFFSET_Y_KEY = "source_offset_y";
+const char* SOURCE_OFFSET_Z_KEY = "source_offset_z";
 
 const unsigned int VALID_OBJECT_TYPES_COUNT = 1;
 const char* VALID_OBJECT_TYPES[] =
@@ -89,6 +115,13 @@ const char* INVALID_OBJECT_TYPES[] =
     "support",
     "surface",
     "other"
+};
+
+class version_error : public std::runtime_error
+{
+public:
+    version_error(const std::string& what_arg) : std::runtime_error(what_arg) {}
+    version_error(const char* what_arg) : std::runtime_error(what_arg) {}
 };
 
 const char* get_attribute_value_charptr(const char** attributes, unsigned int attributes_size, const char* attribute_key)
@@ -123,11 +156,21 @@ int get_attribute_value_int(const char** attributes, unsigned int attributes_siz
     return (text != nullptr) ? ::atoi(text) : 0;
 }
 
-Slic3r::Transform3d get_transform_from_string(const std::string& mat_str)
+bool get_attribute_value_bool(const char** attributes, unsigned int attributes_size, const char* attribute_key)
 {
+    const char* text = get_attribute_value_charptr(attributes, attributes_size, attribute_key);
+    return (text != nullptr) ? (bool)::atoi(text) : true;
+}
+
+Slic3r::Transform3d get_transform_from_3mf_specs_string(const std::string& mat_str)
+{
+    // check: https://3mf.io/3d-manufacturing-format/ or https://github.com/3MFConsortium/spec_core/blob/master/3MF%20Core%20Specification.md
+    // to see how matrices are stored inside 3mf according to specifications
+    Slic3r::Transform3d ret = Slic3r::Transform3d::Identity();
+
     if (mat_str.empty())
         // empty string means default identity matrix
-        return Slic3r::Transform3d::Identity();
+        return ret;
 
     std::vector<std::string> mat_elements_str;
     boost::split(mat_elements_str, mat_str, boost::is_any_of(" "), boost::token_compress_on);
@@ -135,9 +178,8 @@ Slic3r::Transform3d get_transform_from_string(const std::string& mat_str)
     unsigned int size = (unsigned int)mat_elements_str.size();
     if (size != 12)
         // invalid data, return identity matrix
-        return Slic3r::Transform3d::Identity();
+        return ret;
 
-    Slic3r::Transform3d ret = Slic3r::Transform3d::Identity();
     unsigned int i = 0;
     // matrices are stored into 3mf files as 4x3
     // we need to transpose them
@@ -186,6 +228,11 @@ bool is_valid_object_type(const std::string& type)
 }
 
 namespace Slic3r {
+
+//! macro used to mark string used at localization,
+//! return same string
+#define L(s) (s)
+#define _(s) Slic3r::I18N::translate(s)
 
     // Base class with error messages management
     class _3MF_Base
@@ -247,7 +294,10 @@ namespace Slic3r {
 
         struct CurrentObject
         {
+            // ID of the object inside the 3MF file, 1 based.
             int id;
+            // Index of the ModelObject in its respective Model, zero based.
+            int model_object_idx;
             Geometry geometry;
             ModelObject* object;
             ComponentsList components;
@@ -260,6 +310,7 @@ namespace Slic3r {
             void reset()
             {
                 id = -1;
+                model_object_idx = -1;
                 geometry.reset();
                 object = nullptr;
                 components.clear();
@@ -319,16 +370,19 @@ namespace Slic3r {
             VolumeMetadataList volumes;
         };
 
-        typedef std::map<int, ModelObject*> IdToModelObjectMap;
+        // Map from a 1 based 3MF object ID to a 0 based ModelObject index inside m_model->objects.
+        typedef std::map<int, int> IdToModelObjectMap;
         typedef std::map<int, ComponentsList> IdToAliasesMap;
         typedef std::vector<Instance> InstancesList;
         typedef std::map<int, ObjectMetadata> IdToMetadataMap;
         typedef std::map<int, Geometry> IdToGeometryMap;
         typedef std::map<int, std::vector<coordf_t>> IdToLayerHeightsProfileMap;
+        typedef std::map<int, t_layer_config_ranges> IdToLayerConfigRangesMap;
         typedef std::map<int, std::vector<sla::SupportPoint>> IdToSlaSupportPointsMap;
 
         // Version of the 3mf file
         unsigned int m_version;
+        bool m_check_version;
 
         XML_Parser m_xml_parser;
         Model* m_model;
@@ -341,6 +395,7 @@ namespace Slic3r {
         CurrentConfig m_curr_config;
         IdToMetadataMap m_objects_metadata;
         IdToLayerHeightsProfileMap m_layer_heights_profiles;
+        IdToLayerConfigRangesMap m_layer_config_ranges;
         IdToSlaSupportPointsMap m_sla_support_points;
         std::string m_curr_metadata_name;
         std::string m_curr_characters;
@@ -350,7 +405,7 @@ namespace Slic3r {
         _3MF_Importer();
         ~_3MF_Importer();
 
-        bool load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config);
+        bool load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config, bool check_version);
 
     private:
         void _destroy_xml_parser();
@@ -359,6 +414,7 @@ namespace Slic3r {
         bool _load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config);
         bool _extract_model_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_layer_heights_profile_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
+        void _extract_layer_config_ranges_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_sla_support_points_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
 
         void _extract_print_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, const std::string& archive_filename);
@@ -412,7 +468,7 @@ namespace Slic3r {
         bool _handle_start_metadata(const char** attributes, unsigned int num_attributes);
         bool _handle_end_metadata();
 
-        bool _create_object_instance(int object_id, const Transform3d& transform, unsigned int recur_counter);
+        bool _create_object_instance(int object_id, const Transform3d& transform, const bool printable, unsigned int recur_counter);
 
         void _apply_transform(ModelInstance& instance, const Transform3d& transform);
 
@@ -442,6 +498,7 @@ namespace Slic3r {
 
     _3MF_Importer::_3MF_Importer()
         : m_version(0)
+        , m_check_version(false)
         , m_xml_parser(nullptr)
         , m_model(nullptr)   
         , m_unit_factor(1.0f)
@@ -456,9 +513,10 @@ namespace Slic3r {
         _destroy_xml_parser();
     }
 
-    bool _3MF_Importer::load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config)
+    bool _3MF_Importer::load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config, bool check_version)
     {
         m_version = 0;
+        m_check_version = check_version;
         m_model = &model;
         m_unit_factor = 1.0f;
         m_curr_object.reset();
@@ -470,6 +528,7 @@ namespace Slic3r {
         m_curr_config.volume_id = -1;
         m_objects_metadata.clear();
         m_layer_heights_profiles.clear();
+        m_layer_config_ranges.clear();
         m_sla_support_points.clear();
         m_curr_metadata_name.clear();
         m_curr_characters.clear();
@@ -497,10 +556,8 @@ namespace Slic3r {
     {
         mz_zip_archive archive;
         mz_zip_zero_struct(&archive);
-       
-        mz_bool res = mz_zip_reader_init_file(&archive, filename.c_str(), 0);
-        if (res == 0)
-        {
+
+        if (!open_zip_reader(&archive, filename)) {
             add_error("Unable to open the file");
             return false;
         }
@@ -521,12 +578,21 @@ namespace Slic3r {
 
                 if (boost::algorithm::istarts_with(name, MODEL_FOLDER) && boost::algorithm::iends_with(name, MODEL_EXTENSION))
                 {
-                    // valid model name -> extract model
-                    if (!_extract_model_from_archive(archive, stat))
+                    try
                     {
-                        mz_zip_reader_end(&archive);
-                        add_error("Archive does not contain a valid model");
-                        return false;
+                        // valid model name -> extract model
+                        if (!_extract_model_from_archive(archive, stat))
+                        {
+                            close_zip_reader(&archive);
+                            add_error("Archive does not contain a valid model");
+                            return false;
+                        }
+                    }
+                    catch (const std::exception& e)
+                    {
+                        // ensure the zip archive is closed and rethrow the exception
+                        close_zip_reader(&archive);
+                        throw std::runtime_error(e.what());
                     }
                 }
             }
@@ -542,8 +608,13 @@ namespace Slic3r {
 
                 if (boost::algorithm::iequals(name, LAYER_HEIGHTS_PROFILE_FILE))
                 {
-                    // extract slic3r lazer heights profile file
+                    // extract slic3r layer heights profile file
                     _extract_layer_heights_profile_config_from_archive(archive, stat);
+                }
+                if (boost::algorithm::iequals(name, LAYER_CONFIG_RANGES_FILE))
+                {
+                    // extract slic3r layer config ranges file
+                    _extract_layer_config_ranges_from_archive(archive, stat);
                 }
                 else if (boost::algorithm::iequals(name, SLA_SUPPORT_POINTS_FILE))
                 {
@@ -560,7 +631,7 @@ namespace Slic3r {
                     // extract slic3r model config file
                     if (!_extract_model_config_from_archive(archive, stat, model))
                     {
-                        mz_zip_reader_end(&archive);
+                        close_zip_reader(&archive);
                         add_error("Archive does not contain a valid model config");
                         return false;
                     }
@@ -568,10 +639,11 @@ namespace Slic3r {
             }
         }
 
-        mz_zip_reader_end(&archive);
+        close_zip_reader(&archive);
 
         for (const IdToModelObjectMap::value_type& object : m_objects)
         {
+            ModelObject *model_object = m_model->objects[object.second];
             ObjectMetadata::VolumeMetadataList volumes;
             ObjectMetadata::VolumeMetadataList* volumes_ptr = nullptr;
 
@@ -582,14 +654,21 @@ namespace Slic3r {
                 return false;
             }
 
-            IdToLayerHeightsProfileMap::iterator obj_layer_heights_profile = m_layer_heights_profiles.find(object.first);
+            // m_layer_heights_profiles are indexed by a 1 based model object index.
+            IdToLayerHeightsProfileMap::iterator obj_layer_heights_profile = m_layer_heights_profiles.find(object.second + 1);
             if (obj_layer_heights_profile != m_layer_heights_profiles.end())
-                object.second->layer_height_profile = obj_layer_heights_profile->second;
+                model_object->layer_height_profile = obj_layer_heights_profile->second;
 
-            IdToSlaSupportPointsMap::iterator obj_sla_support_points = m_sla_support_points.find(object.first);
+            // m_layer_config_ranges are indexed by a 1 based model object index.
+            IdToLayerConfigRangesMap::iterator obj_layer_config_ranges = m_layer_config_ranges.find(object.second + 1);
+            if (obj_layer_config_ranges != m_layer_config_ranges.end())
+                model_object->layer_config_ranges = obj_layer_config_ranges->second;
+
+            // m_sla_support_points are indexed by a 1 based model object index.
+            IdToSlaSupportPointsMap::iterator obj_sla_support_points = m_sla_support_points.find(object.second + 1);
             if (obj_sla_support_points != m_sla_support_points.end() && !obj_sla_support_points->second.empty()) {
-                object.second->sla_support_points = obj_sla_support_points->second;
-                object.second->sla_points_status = sla::PointsStatus::UserModified;
+                model_object->sla_support_points = obj_sla_support_points->second;
+                model_object->sla_points_status = sla::PointsStatus::UserModified;
             }
 
             IdToMetadataMap::iterator obj_metadata = m_objects_metadata.find(object.first);
@@ -601,9 +680,9 @@ namespace Slic3r {
                 for (const Metadata& metadata : obj_metadata->second.metadata)
                 {
                     if (metadata.key == "name")
-                        object.second->name = metadata.value;
+                        model_object->name = metadata.value;
                     else
-                        object.second->config.set_deserialize(metadata.key, metadata.value);
+                        model_object->config.set_deserialize(metadata.key, metadata.value);
                 }
 
                 // select object's detected volumes
@@ -620,7 +699,7 @@ namespace Slic3r {
                 volumes_ptr = &volumes;
             }
 
-            if (!_generate_volumes(*object.second, obj_geometry->second, *volumes_ptr))
+            if (!_generate_volumes(*model_object, obj_geometry->second, *volumes_ptr))
                 return false;
         }
 
@@ -651,25 +730,46 @@ namespace Slic3r {
         XML_SetElementHandler(m_xml_parser, _3MF_Importer::_handle_start_model_xml_element, _3MF_Importer::_handle_end_model_xml_element);
         XML_SetCharacterDataHandler(m_xml_parser, _3MF_Importer::_handle_model_xml_characters);
 
-        void* parser_buffer = XML_GetBuffer(m_xml_parser, (int)stat.m_uncomp_size);
-        if (parser_buffer == nullptr)
+        struct CallbackData
         {
-            add_error("Unable to create buffer");
+            XML_Parser& parser;
+            const mz_zip_archive_file_stat& stat;
+
+            CallbackData(XML_Parser& parser, const mz_zip_archive_file_stat& stat) : parser(parser), stat(stat) {}
+        };
+
+        CallbackData data(m_xml_parser, stat);
+
+        mz_bool res = 0;
+
+        try
+        {
+            res = mz_zip_reader_extract_file_to_callback(&archive, stat.m_filename, [](void* pOpaque, mz_uint64 file_ofs, const void* pBuf, size_t n)->size_t {
+                CallbackData* data = (CallbackData*)pOpaque;
+                if (!XML_Parse(data->parser, (const char*)pBuf, (int)n, (file_ofs + n == data->stat.m_uncomp_size) ? 1 : 0))
+                {
+                    char error_buf[1024];
+                    ::sprintf(error_buf, "Error (%s) while parsing '%s' at line %d", XML_ErrorString(XML_GetErrorCode(data->parser)), data->stat.m_filename, (int)XML_GetCurrentLineNumber(data->parser));
+                    throw std::runtime_error(error_buf);
+                }
+
+                return n;
+                }, &data, 0);
+        }
+        catch (const version_error& e)
+        {
+            // rethrow the exception
+            throw std::runtime_error(e.what());
+        }
+        catch (std::exception& e)
+        {
+            add_error(e.what());
             return false;
         }
 
-        mz_bool res = mz_zip_reader_extract_file_to_mem(&archive, stat.m_filename, parser_buffer, (size_t)stat.m_uncomp_size, 0);
         if (res == 0)
         {
-            add_error("Error while reading model data to buffer");
-            return false;
-        }
-
-        if (!XML_ParseBuffer(m_xml_parser, (int)stat.m_uncomp_size, 1))
-        {
-            char error_buf[1024];
-            ::sprintf(error_buf, "Error (%s) while parsing xml file at line %d", XML_ErrorString(XML_GetErrorCode(m_xml_parser)), XML_GetCurrentLineNumber(m_xml_parser));
-            add_error(error_buf);
+            add_error("Error while extracting model data from zip archive");
             return false;
         }
 
@@ -762,6 +862,66 @@ namespace Slic3r {
         }
     }
 
+    void _3MF_Importer::_extract_layer_config_ranges_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat)
+    {
+        if (stat.m_uncomp_size > 0)
+        {
+            std::string buffer((size_t)stat.m_uncomp_size, 0);
+            mz_bool res = mz_zip_reader_extract_file_to_mem(&archive, stat.m_filename, (void*)buffer.data(), (size_t)stat.m_uncomp_size, 0);
+            if (res == 0) {
+                add_error("Error while reading layer config ranges data to buffer");
+                return;
+            }
+
+            std::istringstream iss(buffer); // wrap returned xml to istringstream
+            pt::ptree objects_tree;
+            pt::read_xml(iss, objects_tree);
+
+            for (const auto& object : objects_tree.get_child("objects"))
+            {
+                pt::ptree object_tree = object.second;
+                int obj_idx = object_tree.get<int>("<xmlattr>.id", -1);
+                if (obj_idx <= 0) {
+                    add_error("Found invalid object id");
+                    continue;
+                }
+
+                IdToLayerConfigRangesMap::iterator object_item = m_layer_config_ranges.find(obj_idx);
+                if (object_item != m_layer_config_ranges.end()) {
+                    add_error("Found duplicated layer config range");
+                    continue;
+                }
+
+                t_layer_config_ranges config_ranges;
+
+                for (const auto& range : object_tree)
+                {
+                    if (range.first != "range")
+                        continue;
+                    pt::ptree range_tree = range.second;
+                    double min_z = range_tree.get<double>("<xmlattr>.min_z");
+                    double max_z = range_tree.get<double>("<xmlattr>.max_z");
+
+                    // get Z range information
+                    DynamicPrintConfig& config = config_ranges[{ min_z, max_z }];
+
+                    for (const auto& option : range_tree)
+                    {
+                        if (option.first != "option")
+                            continue;
+                        std::string opt_key = option.second.get<std::string>("<xmlattr>.opt_key");
+                        std::string value = option.second.data();
+
+                        config.set_deserialize(opt_key, value);
+                    }
+                }
+
+                if (!config_ranges.empty())
+                    m_layer_config_ranges.insert(IdToLayerConfigRangesMap::value_type(obj_idx, config_ranges));
+            }
+        }
+    }
+
     void _3MF_Importer::_extract_sla_support_points_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat)
     {
         if (stat.m_uncomp_size > 0)
@@ -828,19 +988,20 @@ namespace Slic3r {
 
                 if (version == 0) {
                     for (unsigned int i=0; i<object_data_points.size(); i+=3)
-                    sla_support_points.emplace_back(std::atof(object_data_points[i+0].c_str()),
-                                                    std::atof(object_data_points[i+1].c_str()),
-                                                    std::atof(object_data_points[i+2].c_str()),
+                    sla_support_points.emplace_back(float(std::atof(object_data_points[i+0].c_str())),
+                                                    float(std::atof(object_data_points[i+1].c_str())),
+													float(std::atof(object_data_points[i+2].c_str())),
                                                     0.4f,
                                                     false);
                 }
                 if (version == 1) {
                     for (unsigned int i=0; i<object_data_points.size(); i+=5)
-                    sla_support_points.emplace_back(std::atof(object_data_points[i+0].c_str()),
-                                                    std::atof(object_data_points[i+1].c_str()),
-                                                    std::atof(object_data_points[i+2].c_str()),
-                                                    std::atof(object_data_points[i+3].c_str()),
-                                                    std::atof(object_data_points[i+4].c_str()));
+                    sla_support_points.emplace_back(float(std::atof(object_data_points[i+0].c_str())),
+                                                    float(std::atof(object_data_points[i+1].c_str())),
+                                                    float(std::atof(object_data_points[i+2].c_str())),
+                                                    float(std::atof(object_data_points[i+3].c_str())),
+													//FIXME storing boolean as 0 / 1 and importing it as float.
+                                                    std::abs(std::atof(object_data_points[i+4].c_str()) - 1.) < EPSILON);
                 }
 
                 if (!sla_support_points.empty())
@@ -887,7 +1048,7 @@ namespace Slic3r {
         if (!XML_ParseBuffer(m_xml_parser, (int)stat.m_uncomp_size, 1))
         {
             char error_buf[1024];
-            ::sprintf(error_buf, "Error (%s) while parsing xml file at line %d", XML_ErrorString(XML_GetErrorCode(m_xml_parser)), XML_GetCurrentLineNumber(m_xml_parser));
+            ::sprintf(error_buf, "Error (%s) while parsing xml file at line %d", XML_ErrorString(XML_GetErrorCode(m_xml_parser)), (int)XML_GetCurrentLineNumber(m_xml_parser));
             add_error(error_buf);
             return false;
         }
@@ -1029,8 +1190,9 @@ namespace Slic3r {
         // deletes all non-built or non-instanced objects
         for (const IdToModelObjectMap::value_type& object : m_objects)
         {
-            if ((object.second != nullptr) && (object.second->instances.size() == 0))
-                m_model->delete_object(object.second);
+            ModelObject *model_object = m_model->objects[object.second];
+            if ((model_object != nullptr) && (model_object->instances.size() == 0))
+                m_model->delete_object(model_object);
         }
 
         // applies instances' matrices
@@ -1070,6 +1232,7 @@ namespace Slic3r {
         if (is_valid_object_type(get_attribute_value_string(attributes, num_attributes, TYPE_ATTR)))
         {
             // create new object (it may be removed later if no instances are generated from it)
+            m_curr_object.model_object_idx = (int)m_model->objects.size();
             m_curr_object.object = m_model->add_object();
             if (m_curr_object.object == nullptr)
             {
@@ -1121,7 +1284,7 @@ namespace Slic3r {
                 // stores the object for later use
                 if (m_objects.find(m_curr_object.id) == m_objects.end())
                 {
-                    m_objects.insert(IdToModelObjectMap::value_type(m_curr_object.id, m_curr_object.object));
+                    m_objects.insert(IdToModelObjectMap::value_type(m_curr_object.id, m_curr_object.model_object_idx));
                     m_objects_aliases.insert(IdToAliasesMap::value_type(m_curr_object.id, ComponentsList(1, Component(m_curr_object.id)))); // aliases itself
                 }
                 else
@@ -1229,7 +1392,7 @@ namespace Slic3r {
     bool _3MF_Importer::_handle_start_component(const char** attributes, unsigned int num_attributes)
     {
         int object_id = get_attribute_value_int(attributes, num_attributes, OBJECTID_ATTR);
-        Transform3d transform = get_transform_from_string(get_attribute_value_string(attributes, num_attributes, TRANSFORM_ATTR));
+        Transform3d transform = get_transform_from_3mf_specs_string(get_attribute_value_string(attributes, num_attributes, TRANSFORM_ATTR));
 
         IdToModelObjectMap::iterator object_item = m_objects.find(object_id);
         if (object_item == m_objects.end())
@@ -1275,9 +1438,10 @@ namespace Slic3r {
         // see specifications
 
         int object_id = get_attribute_value_int(attributes, num_attributes, OBJECTID_ATTR);
-        Transform3d transform = get_transform_from_string(get_attribute_value_string(attributes, num_attributes, TRANSFORM_ATTR));
+        Transform3d transform = get_transform_from_3mf_specs_string(get_attribute_value_string(attributes, num_attributes, TRANSFORM_ATTR));
+        int printable = get_attribute_value_bool(attributes, num_attributes, PRINTABLE_ATTR);
 
-        return _create_object_instance(object_id, transform, 1);
+        return _create_object_instance(object_id, transform, printable, 1);
     }
 
     bool _3MF_Importer::_handle_end_item()
@@ -1300,12 +1464,20 @@ namespace Slic3r {
     bool _3MF_Importer::_handle_end_metadata()
     {
         if (m_curr_metadata_name == SLIC3RPE_3MF_VERSION)
+        {
             m_version = (unsigned int)atoi(m_curr_characters.c_str());
+
+            if (m_check_version && (m_version > VERSION_3MF))
+            {
+                std::string msg = _(L("The selected 3mf file has been saved with a newer version of " + std::string(SLIC3R_APP_NAME) + " and is not compatible."));
+                throw version_error(msg.c_str());
+            }
+        }
 
         return true;
     }
 
-    bool _3MF_Importer::_create_object_instance(int object_id, const Transform3d& transform, unsigned int recur_counter)
+    bool _3MF_Importer::_create_object_instance(int object_id, const Transform3d& transform, const bool printable, unsigned int recur_counter)
     {
         static const unsigned int MAX_RECURSIONS = 10;
 
@@ -1328,19 +1500,20 @@ namespace Slic3r {
             // aliasing to itself
 
             IdToModelObjectMap::iterator object_item = m_objects.find(object_id);
-            if ((object_item == m_objects.end()) || (object_item->second == nullptr))
+            if ((object_item == m_objects.end()) || (object_item->second == -1))
             {
                 add_error("Found invalid object");
                 return false;
             }
             else
             {
-                ModelInstance* instance = object_item->second->add_instance();
+                ModelInstance* instance = m_model->objects[object_item->second]->add_instance();
                 if (instance == nullptr)
                 {
                     add_error("Unable to add object instance");
                     return false;
                 }
+                instance->printable = printable;
 
                 m_instances.emplace_back(instance, transform);
             }
@@ -1350,7 +1523,7 @@ namespace Slic3r {
             // recursively process nested components
             for (const Component& component : it->second)
             {
-                if (!_create_object_instance(component.object_id, transform * component.transform, recur_counter + 1))
+                if (!_create_object_instance(component.object_id, transform * component.transform, printable, recur_counter + 1))
                     return false;
             }
         }
@@ -1442,7 +1615,7 @@ namespace Slic3r {
             object->second.metadata.emplace_back(key, value);
         else if (type == VOLUME_TYPE)
         {
-            if (m_curr_config.volume_id < object->second.volumes.size())
+            if (size_t(m_curr_config.volume_id) < object->second.volumes.size())
                 object->second.volumes[m_curr_config.volume_id].metadata.emplace_back(key, value);
         }
         else
@@ -1478,11 +1651,26 @@ namespace Slic3r {
                 return false;
             }
 
+            Slic3r::Geometry::Transformation transform;
+            if (m_version > 1)
+            {
+                // extract the volume transformation from the volume's metadata, if present
+                for (const Metadata& metadata : volume_data.metadata)
+                {
+                    if (metadata.key == MATRIX_KEY)
+                    {
+                        transform.set_from_string(metadata.value);
+                        break;
+                    }
+                }
+            }
+            Transform3d inv_matrix = transform.get_matrix().inverse();
+
             // splits volume out of imported geometry
-            unsigned int triangles_count = volume_data.last_triangle_id - volume_data.first_triangle_id + 1;
-            ModelVolume* volume = object.add_volume(TriangleMesh());
-            stl_file& stl = volume->mesh.stl;
-            stl.stats.type = inmemory;
+			TriangleMesh triangle_mesh;
+            stl_file    &stl             = triangle_mesh.stl;
+			unsigned int triangles_count = volume_data.last_triangle_id - volume_data.first_triangle_id + 1;
+			stl.stats.type = inmemory;
             stl.stats.number_of_facets = (uint32_t)triangles_count;
             stl.stats.original_num_facets = (int)stl.stats.number_of_facets;
             stl_allocate(&stl);
@@ -1495,16 +1683,25 @@ namespace Slic3r {
                 stl_facet& facet = stl.facet_start[i];
                 for (unsigned int v = 0; v < 3; ++v)
                 {
-                    ::memcpy(facet.vertex[v].data(), (const void*)&geometry.vertices[geometry.triangles[src_start_id + ii + v] * 3], 3 * sizeof(float));
+                    unsigned int tri_id = geometry.triangles[src_start_id + ii + v] * 3;
+                    Vec3f vertex(geometry.vertices[tri_id + 0], geometry.vertices[tri_id + 1], geometry.vertices[tri_id + 2]);
+                    if (m_version > 1)
+                        // revert the vertices to the original mesh reference system
+                        vertex = (inv_matrix * vertex.cast<double>()).cast<float>();
+                    ::memcpy(facet.vertex[v].data(), (const void*)vertex.data(), 3 * sizeof(float));
                 }
             }
 
-            stl_get_size(&stl);
-            volume->mesh.repair();
-            volume->center_geometry();
+			stl_get_size(&stl);
+			triangle_mesh.repair();
+
+			ModelVolume* volume = object.add_volume(std::move(triangle_mesh));
+            // apply the volume matrix taken from the metadata, if present
+            if (m_version > 1)
+                volume->set_transformation(transform);
             volume->calculate_convex_hull();
 
-            // apply volume's name and config data
+            // apply the remaining volume's metadata
             for (const Metadata& metadata : volume_data.metadata)
             {
                 if (metadata.key == NAME_KEY)
@@ -1513,6 +1710,18 @@ namespace Slic3r {
 					volume->set_type(ModelVolumeType::PARAMETER_MODIFIER);
                 else if (metadata.key == VOLUME_TYPE_KEY)
                     volume->set_type(ModelVolume::type_from_string(metadata.value));
+                else if (metadata.key == SOURCE_FILE_KEY)
+                    volume->source.input_file = metadata.value;
+                else if (metadata.key == SOURCE_OBJECT_ID_KEY)
+                    volume->source.object_idx = ::atoi(metadata.value.c_str());
+                else if (metadata.key == SOURCE_VOLUME_ID_KEY)
+                    volume->source.volume_idx = ::atoi(metadata.value.c_str());
+                else if (metadata.key == SOURCE_OFFSET_X_KEY)
+                    volume->source.mesh_offset(0) = ::atof(metadata.value.c_str());
+                else if (metadata.key == SOURCE_OFFSET_Y_KEY)
+                    volume->source.mesh_offset(1) = ::atof(metadata.value.c_str());
+                else if (metadata.key == SOURCE_OFFSET_Z_KEY)
+                    volume->source.mesh_offset(2) = ::atof(metadata.value.c_str());
                 else
                     volume->config.set_deserialize(metadata.key, metadata.value);
             }
@@ -1562,10 +1771,12 @@ namespace Slic3r {
         {
             unsigned int id;
             Transform3d transform;
+            bool printable;
 
-            BuildItem(unsigned int id, const Transform3d& transform)
+            BuildItem(unsigned int id, const Transform3d& transform, const bool printable)
                 : id(id)
                 , transform(transform)
+                , printable(printable)
             {
             }
         };
@@ -1600,113 +1811,167 @@ namespace Slic3r {
         typedef std::vector<BuildItem> BuildItemsList;
         typedef std::map<int, ObjectData> IdToObjectDataMap;
 
-        IdToObjectDataMap m_objects_data;
-
     public:
+#if ENABLE_THUMBNAIL_GENERATOR
+        bool save_model_to_file(const std::string& filename, Model& model, const DynamicPrintConfig* config, const ThumbnailData* thumbnail_data = nullptr);
+#else
         bool save_model_to_file(const std::string& filename, Model& model, const DynamicPrintConfig* config);
+#endif // ENABLE_THUMBNAIL_GENERATOR
 
     private:
+#if ENABLE_THUMBNAIL_GENERATOR
+        bool _save_model_to_file(const std::string& filename, Model& model, const DynamicPrintConfig* config, const ThumbnailData* thumbnail_data);
+#else
         bool _save_model_to_file(const std::string& filename, Model& model, const DynamicPrintConfig* config);
+#endif // ENABLE_THUMBNAIL_GENERATOR
         bool _add_content_types_file_to_archive(mz_zip_archive& archive);
+#if ENABLE_THUMBNAIL_GENERATOR
+        bool _add_thumbnail_file_to_archive(mz_zip_archive& archive, const ThumbnailData& thumbnail_data);
+#endif // ENABLE_THUMBNAIL_GENERATOR
         bool _add_relationships_file_to_archive(mz_zip_archive& archive);
-        bool _add_model_file_to_archive(mz_zip_archive& archive, Model& model);
+        bool _add_model_file_to_archive(mz_zip_archive& archive, const Model& model, IdToObjectDataMap &objects_data);
         bool _add_object_to_model_stream(std::stringstream& stream, unsigned int& object_id, ModelObject& object, BuildItemsList& build_items, VolumeToOffsetsMap& volumes_offsets);
         bool _add_mesh_to_object_stream(std::stringstream& stream, ModelObject& object, VolumeToOffsetsMap& volumes_offsets);
         bool _add_build_to_model_stream(std::stringstream& stream, const BuildItemsList& build_items);
         bool _add_layer_height_profile_file_to_archive(mz_zip_archive& archive, Model& model);
+        bool _add_layer_config_ranges_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_sla_support_points_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_print_config_file_to_archive(mz_zip_archive& archive, const DynamicPrintConfig &config);
-        bool _add_model_config_file_to_archive(mz_zip_archive& archive, const Model& model);
+        bool _add_model_config_file_to_archive(mz_zip_archive& archive, const Model& model, const IdToObjectDataMap &objects_data);
     };
 
+#if ENABLE_THUMBNAIL_GENERATOR
+    bool _3MF_Exporter::save_model_to_file(const std::string& filename, Model& model, const DynamicPrintConfig* config, const ThumbnailData* thumbnail_data)
+    {
+        clear_errors();
+        return _save_model_to_file(filename, model, config, thumbnail_data);
+    }
+#else
     bool _3MF_Exporter::save_model_to_file(const std::string& filename, Model& model, const DynamicPrintConfig* config)
     {
         clear_errors();
         return _save_model_to_file(filename, model, config);
     }
+#endif // ENABLE_THUMBNAIL_GENERATOR
 
+#if ENABLE_THUMBNAIL_GENERATOR
+    bool _3MF_Exporter::_save_model_to_file(const std::string& filename, Model& model, const DynamicPrintConfig* config, const ThumbnailData* thumbnail_data)
+#else
     bool _3MF_Exporter::_save_model_to_file(const std::string& filename, Model& model, const DynamicPrintConfig* config)
+#endif // ENABLE_THUMBNAIL_GENERATOR
     {
         mz_zip_archive archive;
         mz_zip_zero_struct(&archive);
 
-        m_objects_data.clear();
-
-        mz_bool res = mz_zip_writer_init_file(&archive, filename.c_str(), 0);
-        if (res == 0)
-        {
+        if (!open_zip_writer(&archive, filename)) {
             add_error("Unable to open the file");
             return false;
         }
 
-        // adds content types file
+        // Adds content types file ("[Content_Types].xml";).
+        // The content of this file is the same for each PrusaSlicer 3mf.
         if (!_add_content_types_file_to_archive(archive))
         {
-            mz_zip_writer_end(&archive);
+            close_zip_writer(&archive);
             boost::filesystem::remove(filename);
             return false;
         }
 
-        // adds relationships file
+#if ENABLE_THUMBNAIL_GENERATOR
+        if ((thumbnail_data != nullptr) && thumbnail_data->is_valid())
+        {
+            // Adds the file Metadata/thumbnail.png.
+            if (!_add_thumbnail_file_to_archive(archive, *thumbnail_data))
+            {
+                close_zip_writer(&archive);
+                boost::filesystem::remove(filename);
+                return false;
+            }
+        }
+#endif // ENABLE_THUMBNAIL_GENERATOR
+
+        // Adds relationships file ("_rels/.rels"). 
+        // The content of this file is the same for each PrusaSlicer 3mf.
+        // The relationshis file contains a reference to the geometry file "3D/3dmodel.model", the name was chosen to be compatible with CURA.
         if (!_add_relationships_file_to_archive(archive))
         {
-            mz_zip_writer_end(&archive);
+            close_zip_writer(&archive);
             boost::filesystem::remove(filename);
             return false;
         }
 
-        // adds model file
-        if (!_add_model_file_to_archive(archive, model))
+        // Adds model file ("3D/3dmodel.model").
+        // This is the one and only file that contains all the geometry (vertices and triangles) of all ModelVolumes.
+        IdToObjectDataMap objects_data;
+        if (!_add_model_file_to_archive(archive, model, objects_data))
         {
-            mz_zip_writer_end(&archive);
+            close_zip_writer(&archive);
             boost::filesystem::remove(filename);
             return false;
         }
 
-        // adds layer height profile file
+        // Adds layer height profile file ("Metadata/Slic3r_PE_layer_heights_profile.txt").
+        // All layer height profiles of all ModelObjects are stored here, indexed by 1 based index of the ModelObject in Model.
+        // The index differes from the index of an object ID of an object instance of a 3MF file!
         if (!_add_layer_height_profile_file_to_archive(archive, model))
         {
-            mz_zip_writer_end(&archive);
+            close_zip_writer(&archive);
             boost::filesystem::remove(filename);
             return false;
         }
 
-        // adds sla support points file
+        // Adds layer config ranges file ("Metadata/Slic3r_PE_layer_config_ranges.txt").
+        // All layer height profiles of all ModelObjects are stored here, indexed by 1 based index of the ModelObject in Model.
+        // The index differes from the index of an object ID of an object instance of a 3MF file!
+        if (!_add_layer_config_ranges_file_to_archive(archive, model))
+        {
+            close_zip_writer(&archive);
+            boost::filesystem::remove(filename);
+            return false;
+        }
+
+        // Adds sla support points file ("Metadata/Slic3r_PE_sla_support_points.txt").
+        // All  sla support points of all ModelObjects are stored here, indexed by 1 based index of the ModelObject in Model.
+        // The index differes from the index of an object ID of an object instance of a 3MF file!
         if (!_add_sla_support_points_file_to_archive(archive, model))
         {
-            mz_zip_writer_end(&archive);
+            close_zip_writer(&archive);
             boost::filesystem::remove(filename);
             return false;
         }
 
-        // adds slic3r print config file
+        // Adds slic3r print config file ("Metadata/Slic3r_PE.config").
+        // This file contains the content of FullPrintConfing / SLAFullPrintConfig.
         if (config != nullptr)
         {
             if (!_add_print_config_file_to_archive(archive, *config))
             {
-                mz_zip_writer_end(&archive);
+                close_zip_writer(&archive);
                 boost::filesystem::remove(filename);
                 return false;
             }
         }
 
-        // adds slic3r model config file
-        if (!_add_model_config_file_to_archive(archive, model))
+        // Adds slic3r model config file ("Metadata/Slic3r_PE_model.config").
+        // This file contains all the attributes of all ModelObjects and their ModelVolumes (names, parameter overrides).
+        // As there is just a single Indexed Triangle Set data stored per ModelObject, offsets of volumes into their respective Indexed Triangle Set data
+        // is stored here as well.
+        if (!_add_model_config_file_to_archive(archive, model, objects_data))
         {
-            mz_zip_writer_end(&archive);
+            close_zip_writer(&archive);
             boost::filesystem::remove(filename);
             return false;
         }
 
         if (!mz_zip_writer_finalize_archive(&archive))
         {
-            mz_zip_writer_end(&archive);
+            close_zip_writer(&archive);
             boost::filesystem::remove(filename);
             add_error("Unable to finalize the archive");
             return false;
         }
 
-        mz_zip_writer_end(&archive);
+        close_zip_writer(&archive);
 
         return true;
     }
@@ -1718,6 +1983,9 @@ namespace Slic3r {
         stream << "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\n";
         stream << " <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\" />\n";
         stream << " <Default Extension=\"model\" ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodel+xml\" />\n";
+#if ENABLE_THUMBNAIL_GENERATOR
+        stream << " <Default Extension=\"png\" ContentType=\"image/png\" />\n";
+#endif // ENABLE_THUMBNAIL_GENERATOR
         stream << "</Types>";
 
         std::string out = stream.str();
@@ -1731,12 +1999,35 @@ namespace Slic3r {
         return true;
     }
 
+#if ENABLE_THUMBNAIL_GENERATOR
+    bool _3MF_Exporter::_add_thumbnail_file_to_archive(mz_zip_archive& archive, const ThumbnailData& thumbnail_data)
+    {
+        bool res = false;
+
+        size_t png_size = 0;
+        void* png_data = tdefl_write_image_to_png_file_in_memory_ex((const void*)thumbnail_data.pixels.data(), thumbnail_data.width, thumbnail_data.height, 4, &png_size, MZ_DEFAULT_LEVEL, 1);
+        if (png_data != nullptr)
+        {
+            res = mz_zip_writer_add_mem(&archive, THUMBNAIL_FILE.c_str(), (const void*)png_data, png_size, MZ_DEFAULT_COMPRESSION);
+            mz_free(png_data);
+        }
+
+        if (!res)
+            add_error("Unable to add thumbnail file to archive");
+
+        return res;
+    }
+#endif // ENABLE_THUMBNAIL_GENERATOR
+
     bool _3MF_Exporter::_add_relationships_file_to_archive(mz_zip_archive& archive)
     {
         std::stringstream stream;
         stream << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
         stream << "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n";
         stream << " <Relationship Target=\"/" << MODEL_FILE << "\" Id=\"rel-1\" Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\" />\n";
+#if ENABLE_THUMBNAIL_GENERATOR
+        stream << " <Relationship Target=\"/" << THUMBNAIL_FILE << "\" Id=\"rel-2\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail\" />\n";
+#endif // ENABLE_THUMBNAIL_GENERATOR
         stream << "</Relationships>";
 
         std::string out = stream.str();
@@ -1750,7 +2041,7 @@ namespace Slic3r {
         return true;
     }
 
-    bool _3MF_Exporter::_add_model_file_to_archive(mz_zip_archive& archive, Model& model)
+	bool _3MF_Exporter::_add_model_file_to_archive(mz_zip_archive& archive, const Model& model, IdToObjectDataMap &objects_data)
     {
         std::stringstream stream;
         // https://en.cppreference.com/w/cpp/types/numeric_limits/max_digits10
@@ -1763,17 +2054,24 @@ namespace Slic3r {
         stream << " <" << METADATA_TAG << " name=\"" << SLIC3RPE_3MF_VERSION << "\">" << VERSION_3MF << "</" << METADATA_TAG << ">\n";
         stream << " <" << RESOURCES_TAG << ">\n";
 
+        // Instance transformations, indexed by the 3MF object ID (which is a linear serialization of all instances of all ModelObjects).
         BuildItemsList build_items;
 
+        // The object_id here is a one based identifier of the first instance of a ModelObject in the 3MF file, where
+        // all the object instances of all ModelObjects are stored and indexed in a 1 based linear fashion.
+        // Therefore the list of object_ids here may not be continuous.
         unsigned int object_id = 1;
         for (ModelObject* obj : model.objects)
         {
             if (obj == nullptr)
                 continue;
 
+            // Index of an object in the 3MF file corresponding to the 1st instance of a ModelObject.
             unsigned int curr_id = object_id;
-            IdToObjectDataMap::iterator object_it = m_objects_data.insert(IdToObjectDataMap::value_type(curr_id, ObjectData(obj))).first;
-
+            IdToObjectDataMap::iterator object_it = objects_data.insert(IdToObjectDataMap::value_type(curr_id, ObjectData(obj))).first;
+            // Store geometry of all ModelVolumes contained in a single ModelObject into a single 3MF indexed triangle set object.
+            // object_it->second.volumes_offsets will contain the offsets of the ModelVolumes in that single indexed triangle set.
+            // object_id will be increased to point to the 1st instance of the next ModelObject.
             if (!_add_object_to_model_stream(stream, object_id, *obj, build_items, object_it->second.volumes_offsets))
             {
                 add_error("Unable to add object to archive");
@@ -1783,6 +2081,7 @@ namespace Slic3r {
 
         stream << " </" << RESOURCES_TAG << ">\n";
 
+        // Store the transformations of all the ModelInstances of all ModelObjects, indexed in a linear fashion.
         if (!_add_build_to_model_stream(stream, build_items))
         {
             add_error("Unable to add build to archive");
@@ -1807,6 +2106,7 @@ namespace Slic3r {
         unsigned int id = 0;
         for (const ModelInstance* instance : object.instances)
         {
+			assert(instance != nullptr);
             if (instance == nullptr)
                 continue;
 
@@ -1829,7 +2129,9 @@ namespace Slic3r {
             }
 
             Transform3d t = instance->get_matrix();
-            build_items.emplace_back(instance_id, t);
+            // instance_id is just a 1 indexed index in build_items.
+            assert(instance_id == build_items.size() + 1);
+            build_items.emplace_back(instance_id, t, instance->printable);
 
             stream << "  </" << OBJECT_TAG << ">\n";
 
@@ -1851,29 +2153,28 @@ namespace Slic3r {
             if (volume == nullptr)
                 continue;
 
+			if (!volume->mesh().repaired)
+				throw std::runtime_error("store_3mf() requires repair()");
+			if (!volume->mesh().has_shared_vertices())
+				throw std::runtime_error("store_3mf() requires shared vertices");
+
             volumes_offsets.insert(VolumeToOffsetsMap::value_type(volume, Offsets(vertices_count))).first;
 
-            if (!volume->mesh.repaired)
-                volume->mesh.repair();
-
-            stl_file& stl = volume->mesh.stl;
-            if (stl.v_shared == nullptr)
-                stl_generate_shared_vertices(&stl);
-
-            if (stl.stats.shared_vertices == 0)
+            const indexed_triangle_set &its = volume->mesh().its;
+            if (its.vertices.empty())
             {
                 add_error("Found invalid mesh");
                 return false;
             }
 
-            vertices_count += stl.stats.shared_vertices;
+            vertices_count += (int)its.vertices.size();
 
             const Transform3d& matrix = volume->get_matrix();
 
-            for (int i = 0; i < stl.stats.shared_vertices; ++i)
+            for (size_t i = 0; i < its.vertices.size(); ++i)
             {
                 stream << "     <" << VERTEX_TAG << " ";
-                Vec3f v = (matrix * stl.v_shared[i].cast<double>()).cast<float>();
+                Vec3f v = (matrix * its.vertices[i].cast<double>()).cast<float>();
                 stream << "x=\"" << v(0) << "\" ";
                 stream << "y=\"" << v(1) << "\" ";
                 stream << "z=\"" << v(2) << "\" />\n";
@@ -1892,19 +2193,19 @@ namespace Slic3r {
             VolumeToOffsetsMap::iterator volume_it = volumes_offsets.find(volume);
             assert(volume_it != volumes_offsets.end());
 
-            stl_file& stl = volume->mesh.stl;
+            const indexed_triangle_set &its = volume->mesh().its;
 
             // updates triangle offsets
             volume_it->second.first_triangle_id = triangles_count;
-            triangles_count += stl.stats.number_of_facets;
+            triangles_count += (int)its.indices.size();
             volume_it->second.last_triangle_id = triangles_count - 1;
 
-            for (uint32_t i = 0; i < stl.stats.number_of_facets; ++i)
+            for (size_t i = 0; i < its.indices.size(); ++ i)
             {
                 stream << "     <" << TRIANGLE_TAG << " ";
                 for (int j = 0; j < 3; ++j)
                 {
-                    stream << "v" << j + 1 << "=\"" << stl.v_indices[i].vertex[j] + volume_it->second.first_vertex_id << "\" ";
+                    stream << "v" << j + 1 << "=\"" << its.indices[i][j] + volume_it->second.first_vertex_id << "\" ";
                 }
                 stream << "/>\n";
             }
@@ -1928,7 +2229,7 @@ namespace Slic3r {
 
         for (const BuildItem& item : build_items)
         {
-            stream << "  <" << ITEM_TAG << " objectid=\"" << item.id << "\" transform =\"";
+            stream << "  <" << ITEM_TAG << " " << OBJECTID_ATTR << "=\"" << item.id << "\" " << TRANSFORM_ATTR << "=\"";
             for (unsigned c = 0; c < 4; ++c)
             {
                 for (unsigned r = 0; r < 3; ++r)
@@ -1938,7 +2239,7 @@ namespace Slic3r {
                         stream << " ";
                 }
             }
-            stream << "\" />\n";
+            stream << "\" " << PRINTABLE_ATTR << "=\"" << item.printable << "\" />\n";
         }
 
         stream << " </" << BUILD_TAG << ">\n";
@@ -1975,6 +2276,70 @@ namespace Slic3r {
         if (!out.empty())
         {
             if (!mz_zip_writer_add_mem(&archive, LAYER_HEIGHTS_PROFILE_FILE.c_str(), (const void*)out.data(), out.length(), MZ_DEFAULT_COMPRESSION))
+            {
+                add_error("Unable to add layer heights profile file to archive");
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool _3MF_Exporter::_add_layer_config_ranges_file_to_archive(mz_zip_archive& archive, Model& model)
+    {
+        std::string out = "";
+        pt::ptree tree;
+
+        unsigned int object_cnt = 0;
+        for (const ModelObject* object : model.objects)
+        {
+            object_cnt++;
+            const t_layer_config_ranges& ranges = object->layer_config_ranges;
+            if (!ranges.empty())
+            {
+                pt::ptree& obj_tree = tree.add("objects.object","");
+
+                obj_tree.put("<xmlattr>.id", object_cnt);
+
+                // Store the layer config ranges.
+                for (const auto& range : ranges)
+                {
+                    pt::ptree& range_tree = obj_tree.add("range", "");
+
+                    // store minX and maxZ
+                    range_tree.put("<xmlattr>.min_z", range.first.first);
+                    range_tree.put("<xmlattr>.max_z", range.first.second);
+
+                    // store range configuration
+                    const DynamicPrintConfig& config = range.second;
+                    for (const std::string& opt_key : config.keys())
+                    {
+                        pt::ptree& opt_tree = range_tree.add("option", config.opt_serialize(opt_key));
+                        opt_tree.put("<xmlattr>.opt_key", opt_key);
+                    }
+                }
+            }
+        }
+
+        if (!tree.empty())
+        {
+            std::ostringstream oss;
+            boost::property_tree::write_xml(oss, tree);
+            out = oss.str();
+
+            // Post processing("beautification") of the output string for a better preview
+            boost::replace_all(out, "><object",      ">\n <object");
+            boost::replace_all(out, "><range",       ">\n  <range");
+            boost::replace_all(out, "><option",      ">\n   <option");
+            boost::replace_all(out, "></range>",     ">\n  </range>");
+            boost::replace_all(out, "></object>",    ">\n </object>");
+            // OR just 
+            boost::replace_all(out, "><",            ">\n<"); 
+        }
+
+        if (!out.empty())
+        {
+            if (!mz_zip_writer_add_mem(&archive, LAYER_CONFIG_RANGES_FILE.c_str(), (const void*)out.data(), out.length(), MZ_DEFAULT_COMPRESSION))
             {
                 add_error("Unable to add layer heights profile file to archive");
                 return false;
@@ -2031,7 +2396,7 @@ namespace Slic3r {
 
         for (const std::string &key : config.keys())
             if (key != "compatible_printers")
-                out += "; " + key + " = " + config.serialize(key) + "\n";
+                out += "; " + key + " = " + config.opt_serialize(key) + "\n";
 
         if (!out.empty())
         {
@@ -2045,13 +2410,13 @@ namespace Slic3r {
         return true;
     }
 
-    bool _3MF_Exporter::_add_model_config_file_to_archive(mz_zip_archive& archive, const Model& model)
+    bool _3MF_Exporter::_add_model_config_file_to_archive(mz_zip_archive& archive, const Model& model, const IdToObjectDataMap &objects_data)
     {
         std::stringstream stream;
         stream << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
         stream << "<" << CONFIG_TAG << ">\n";
 
-        for (const IdToObjectDataMap::value_type& obj_metadata : m_objects_data)
+        for (const IdToObjectDataMap::value_type& obj_metadata : objects_data)
         {
             const ModelObject* obj = obj_metadata.second.object;
             if (obj != nullptr)
@@ -2065,7 +2430,7 @@ namespace Slic3r {
                 // stores object's config data
                 for (const std::string& key : obj->config.keys())
                 {
-                    stream << "  <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << OBJECT_TYPE << "\" " << KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << obj->config.serialize(key) << "\"/>\n";
+                    stream << "  <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << OBJECT_TYPE << "\" " << KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << obj->config.opt_serialize(key) << "\"/>\n";
                 }
 
                 for (const ModelVolume* volume : obj_metadata.second.object->volumes)
@@ -2092,10 +2457,35 @@ namespace Slic3r {
                             stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << VOLUME_TYPE_KEY << "\" " << 
                                 VALUE_ATTR << "=\"" << ModelVolume::type_to_string(volume->type()) << "\"/>\n";
 
+                            // stores volume's local matrix
+                            stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << MATRIX_KEY << "\" " << VALUE_ATTR << "=\"";
+                            const Transform3d& matrix = volume->get_matrix();
+                            for (int r = 0; r < 4; ++r)
+                            {
+                                for (int c = 0; c < 4; ++c)
+                                {
+                                    stream << matrix(r, c);
+                                    if ((r != 3) || (c != 3))
+                                        stream << " ";
+                                }
+                            }
+                            stream << "\"/>\n";
+
+                            // stores volume's source data
+                            if (!volume->source.input_file.empty())
+                            {
+                                stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << SOURCE_FILE_KEY << "\" " << VALUE_ATTR << "=\"" << xml_escape(volume->source.input_file) << "\"/>\n";
+                                stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << SOURCE_OBJECT_ID_KEY << "\" " << VALUE_ATTR << "=\"" << volume->source.object_idx << "\"/>\n";
+                                stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << SOURCE_VOLUME_ID_KEY << "\" " << VALUE_ATTR << "=\"" << volume->source.volume_idx << "\"/>\n";
+                                stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << SOURCE_OFFSET_X_KEY << "\" " << VALUE_ATTR << "=\"" << volume->source.mesh_offset(0) << "\"/>\n";
+                                stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << SOURCE_OFFSET_Y_KEY << "\" " << VALUE_ATTR << "=\"" << volume->source.mesh_offset(1) << "\"/>\n";
+                                stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << SOURCE_OFFSET_Z_KEY << "\" " << VALUE_ATTR << "=\"" << volume->source.mesh_offset(2) << "\"/>\n";
+                            }
+
                             // stores volume's config data
                             for (const std::string& key : volume->config.keys())
                             {
-                                stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << volume->config.serialize(key) << "\"/>\n";
+                                stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << volume->config.opt_serialize(key) << "\"/>\n";
                             }
 
                             stream << "  </" << VOLUME_TAG << ">\n";
@@ -2120,24 +2510,32 @@ namespace Slic3r {
         return true;
     }
 
-    bool load_3mf(const char* path, DynamicPrintConfig* config, Model* model)
+    bool load_3mf(const char* path, DynamicPrintConfig* config, Model* model, bool check_version)
     {
         if ((path == nullptr) || (config == nullptr) || (model == nullptr))
             return false;
 
         _3MF_Importer importer;
-        bool res = importer.load_model_from_file(path, *model, *config);
+        bool res = importer.load_model_from_file(path, *model, *config, check_version);
         importer.log_errors();
         return res;
     }
 
+#if ENABLE_THUMBNAIL_GENERATOR
+    bool store_3mf(const char* path, Model* model, const DynamicPrintConfig* config, const ThumbnailData* thumbnail_data)
+#else
     bool store_3mf(const char* path, Model* model, const DynamicPrintConfig* config)
+#endif // ENABLE_THUMBNAIL_GENERATOR
     {
         if ((path == nullptr) || (model == nullptr))
             return false;
 
         _3MF_Exporter exporter;
+#if ENABLE_THUMBNAIL_GENERATOR
+        bool res = exporter.save_model_to_file(path, *model, config, thumbnail_data);
+#else
         bool res = exporter.save_model_to_file(path, *model, config);
+#endif // ENABLE_THUMBNAIL_GENERATOR
 
         if (!res)
             exporter.log_errors();

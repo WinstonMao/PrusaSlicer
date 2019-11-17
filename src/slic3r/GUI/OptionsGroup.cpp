@@ -1,4 +1,4 @@
-﻿#include "OptionsGroup.hpp"
+#include "OptionsGroup.hpp"
 #include "ConfigExceptions.hpp"
 
 #include <utility>
@@ -133,7 +133,7 @@ void OptionsGroup::append_line(const Line& line, wxStaticText**	full_Label/* = n
         m_options_mode.push_back(option_set[0].opt.mode);
 
 	// if we have a single option with no label, no sidetext just add it directly to sizer
-	if (option_set.size() == 1 && label_width == 0 && option_set.front().opt.full_width &&
+    if (option_set.size() == 1 && label_width == 0 && option_set.front().opt.full_width &&
         option_set.front().opt.label.empty() &&
 		option_set.front().opt.sidetext.size() == 0 && option_set.front().side_widget == nullptr && 
 		line.get_extra_widgets().size() == 0) {
@@ -202,7 +202,7 @@ void OptionsGroup::append_line(const Line& line, wxStaticText**	full_Label/* = n
                 // so we need a horizontal sizer to arrange these things
                 auto sizer = new wxBoxSizer(wxHORIZONTAL);
                 grid_sizer->Add(sizer, 0, wxEXPAND | (staticbox ? wxALL : wxBOTTOM | wxTOP | wxLEFT), staticbox ? 0 : 1);
-                sizer->Add(m_near_label_widget_ptrs.back(), 0, wxRIGHT, 7);
+                sizer->Add(m_near_label_widget_ptrs.back(), 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 7);
                 sizer->Add(label, 0, (staticbox ? 0 : wxALIGN_RIGHT | wxRIGHT) | wxALIGN_CENTER_VERTICAL, 5);
             }
         }
@@ -233,7 +233,7 @@ void OptionsGroup::append_line(const Line& line, wxStaticText**	full_Label/* = n
 
 		add_undo_buttuns_to_sizer(sizer, field);
 		if (is_window_field(field)) 
-			sizer->Add(field->getWindow(), option.opt.full_width ? 1 : 0, //(option.opt.full_width ? wxEXPAND : 0) |
+            sizer->Add(field->getWindow(), option.opt.full_width ? 1 : 0, //(option.opt.full_width ? wxEXPAND : 0) |
             wxBOTTOM | wxTOP | (option.opt.full_width ? wxEXPAND : wxALIGN_CENTER_VERTICAL), (wxOSX || !staticbox) ? 0 : 2);
 		if (is_sizer_field(field)) 
 			sizer->Add(field->getSizer(), 1, /*(*/option.opt.full_width ? wxEXPAND : /*0) |*/ wxALIGN_CENTER_VERTICAL, 0);
@@ -246,7 +246,7 @@ void OptionsGroup::append_line(const Line& line, wxStaticText**	full_Label/* = n
 		// add label if any
 		if (option.label != "") {
 //!			To correct translation by context have to use wxGETTEXT_IN_CONTEXT macro from wxWidget 3.1.1
-			wxString str_label = (option.label == "Top" || option.label == "Bottom") ?
+			wxString str_label = (option.label == L_CONTEXT("Top", "Layers") || option.label == L_CONTEXT("Bottom", "Layers")) ?
 								_CTX(option.label, "Layers") :
 								_(option.label);
 			label = new wxStaticText(this->ctrl_parent(), wxID_ANY, str_label + ": ", wxDefaultPosition, wxDefaultSize);
@@ -266,7 +266,7 @@ void OptionsGroup::append_line(const Line& line, wxStaticText**	full_Label/* = n
             is_sizer_field(field) ?
                 v_sizer->Add(field->getSizer(), 0, wxEXPAND) :
                 v_sizer->Add(field->getWindow(), 0, wxEXPAND);
-            return;
+            break;//return;
         }
 
 		is_sizer_field(field) ? 
@@ -276,7 +276,7 @@ void OptionsGroup::append_line(const Line& line, wxStaticText**	full_Label/* = n
 		// add sidetext if any
 		if (option.sidetext != "") {
 			auto sidetext = new wxStaticText(	this->ctrl_parent(), wxID_ANY, _(option.sidetext), wxDefaultPosition, 
-												/*wxSize(sidetext_width*wxGetApp().em_unit(), -1)*/wxDefaultSize, wxALIGN_LEFT);
+												wxSize(sidetext_width != -1 ? sidetext_width*wxGetApp().em_unit() : -1, -1) /*wxDefaultSize*/, wxALIGN_LEFT);
 			sidetext->SetBackgroundStyle(wxBG_STYLE_PAINT);
             sidetext->SetFont(wxGetApp().normal_font());
 			sizer_tmp->Add(sidetext, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, 4);
@@ -300,7 +300,7 @@ void OptionsGroup::append_line(const Line& line, wxStaticText**	full_Label/* = n
         {
             // extra widget for non-staticbox option group (like for the frequently used parameters on the sidebar) should be wxALIGN_RIGHT
             const auto v_sizer = new wxBoxSizer(wxVERTICAL);
-            sizer->Add(v_sizer, 1, wxEXPAND);
+            sizer->Add(v_sizer, option_set.size() == 1 ? 0 : 1, wxEXPAND);
             v_sizer->Add(extra_widget(this->ctrl_parent()), 0, wxALIGN_RIGHT);
             return;
         }
@@ -318,6 +318,17 @@ Line OptionsGroup::create_single_option_line(const Option& option) const {
     tmp.opt.label = std::string("");
     retval.append_option(tmp);
     return retval;
+}
+
+void OptionsGroup::clear_fields_except_of(const std::vector<std::string> left_fields)
+{
+    auto it = m_fields.begin();
+    while (it != m_fields.end()) {
+        if (std::find(left_fields.begin(), left_fields.end(), it->first) == left_fields.end())
+            it = m_fields.erase(it);
+        else 
+            it++;
+    }
 }
 
 void OptionsGroup::on_set_focus(const std::string& opt_key)
@@ -361,30 +372,10 @@ void ConfigOptionsGroup::on_change_OG(const t_config_option_key& opt_id, const b
 
 		auto option = m_options.at(opt_id).opt;
 
-		// get value
-//!		auto field_value = get_value(opt_id);
-		if (option.gui_flags.compare("serialized")==0) {
-			if (opt_index != -1) {
-				// 		die "Can't set serialized option indexed value" ;
-			}
-			change_opt_value(*m_config, opt_key, value);
-		}
-		else {
-			if (opt_index == -1) {
-				// change_opt_value(*m_config, opt_key, field_value);
-				//!? why field_value?? in this case changed value will be lose! No?
-				change_opt_value(*m_config, opt_key, value);
-			}
-			else {
-				change_opt_value(*m_config, opt_key, value, opt_index);
-// 				auto value = m_config->get($opt_key);
-// 				$value->[$opt_index] = $field_value;
-// 				$self->config->set($opt_key, $value);
-			}
-		}
+		change_opt_value(*m_config, opt_key, value, opt_index == -1 ? 0 : opt_index);
 	}
 
-	OptionsGroup::on_change_OG(opt_id, value); //!? Why doing this
+	OptionsGroup::on_change_OG(opt_id, value); 
 }
 
 void ConfigOptionsGroup::back_to_initial_value(const std::string& opt_key)
@@ -466,8 +457,9 @@ void ConfigOptionsGroup::Show(const bool show)
 bool ConfigOptionsGroup::update_visibility(ConfigOptionMode mode) {
     if (m_options_mode.empty())
         return true;
-    if (m_grid_sizer->GetEffectiveRowsCount() != m_options_mode.size() &&
-        m_options_mode.size() == 1)
+    int opt_mode_size = m_options_mode.size();
+    if (m_grid_sizer->GetEffectiveRowsCount() != opt_mode_size &&
+        opt_mode_size == 1)
         return m_options_mode[0] <= mode;
 
     Show(true);
@@ -485,7 +477,7 @@ bool ConfigOptionsGroup::update_visibility(ConfigOptionMode mode) {
         coef+= cols;
 	}
 
-    if (hidden_row_cnt == m_options_mode.size()) {
+    if (hidden_row_cnt == opt_mode_size) {
         sizer->ShowItems(false);
         return false;
     }
@@ -524,8 +516,7 @@ void ConfigOptionsGroup::msw_rescale()
             {
                 auto label = dynamic_cast<wxStaticText*>(label_item->GetWindow());
                 if (label != nullptr) {
-                    const int label_height = int(1.5f*label->GetFont().GetPixelSize().y + 0.5f);
-                    label->SetMinSize(wxSize(label_width*em, /*-1*/label_height));
+                    label->SetMinSize(wxSize(label_width*em, -1));
                 }
             }
             else if (label_item->IsSizer()) // case when we have near_label_widget
@@ -535,8 +526,7 @@ void ConfigOptionsGroup::msw_rescale()
                 {
                     auto label = dynamic_cast<wxStaticText*>(l_item->GetWindow());
                     if (label != nullptr) {
-                        const int label_height = int(1.5f*label->GetFont().GetPixelSize().y + 0.5f);
-                        label->SetMinSize(wxSize(label_width*em, /*-1*/label_height));
+                        label->SetMinSize(wxSize(label_width*em, -1));
                     }
                 }
             }
@@ -569,16 +559,42 @@ boost::any ConfigOptionsGroup::get_config_value(const DynamicPrintConfig& config
 	boost::any ret;
 	wxString text_value = wxString("");
 	const ConfigOptionDef* opt = config.def()->get(opt_key);
+
+    if (opt->nullable)
+    {
+        switch (opt->type)
+        {
+        case coPercents:
+        case coFloats: {
+            if (config.option(opt_key)->is_nil())
+                ret = _(L("N/A"));
+            else {
+                double val = opt->type == coFloats ?
+                            config.option<ConfigOptionFloatsNullable>(opt_key)->get_at(idx) :
+                            config.option<ConfigOptionPercentsNullable>(opt_key)->get_at(idx);
+                ret = double_to_string(val); }
+            }
+            break;
+        case coBools:
+            ret = config.option<ConfigOptionBoolsNullable>(opt_key)->values[idx];
+            break;
+        case coInts:
+            ret = config.option<ConfigOptionIntsNullable>(opt_key)->get_at(idx);
+            break;
+        default:
+            break;
+        }
+        return ret;
+    }
+
 	switch (opt->type) {
 	case coFloatOrPercent:{
 		const auto &value = *config.option<ConfigOptionFloatOrPercent>(opt_key);
+
+        text_value = double_to_string(value.value);
 		if (value.percent)
-		{
-			text_value = wxString::Format(_T("%i"), int(value.value));
 			text_value += "%";
-		}
-		else
-			text_value = double_to_string(value.value);
+
 		ret = text_value;
 		break;
 	}
