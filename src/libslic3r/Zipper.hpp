@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2019 - 2020 Tomáš Mészáros @tamasmeszaros
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef ZIPPER_HPP
 #define ZIPPER_HPP
 
@@ -28,7 +32,7 @@ public:
 
     // Will blow up in a runtime exception if the file cannot be created.
     explicit Zipper(const std::string& zipfname,
-                    e_compression level = NO_COMPRESSION);
+                    e_compression level = FAST_COMPRESSION);
     ~Zipper();
 
     // No copies allwed, this is a file resource...
@@ -49,7 +53,7 @@ public:
 
     /// Add a new binary file entry with an instantly given byte buffer.
     /// This method throws exactly like finish_entry() does.
-    void add_entry(const std::string& name, const std::uint8_t* data, size_t l);
+    void add_entry(const std::string& name, const void* data, size_t bytes);
 
     // Writing data to the archive works like with standard streams. The target
     // within the zip file is the entry created with the add_entry method.

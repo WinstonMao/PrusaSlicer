@@ -1,7 +1,15 @@
+///|/ Copyright (c) Prusa Research 2018 - 2020 Oleksandra Iushchenko @YuSanka, Lukáš Matěna @lukasmatena, Vojtěch Bubník @bubnikv
+///|/
+///|/ ported from lib/Slic3r/GUI/AboutDialog.pm:
+///|/ Copyright (c) Prusa Research 2016 - 2018 Vojtěch Bubník @bubnikv
+///|/ Copyright (c) Slic3r 2013 - 2016 Alessandro Ranellucci @alranel
+///|/ Copyright (c) 2015 Pavel Karoukin @hippich
+///|/ Copyright (c) 2012 Henrik Brix Andersen @henrikbrixandersen
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_GUI_AboutDialog_hpp_
 #define slic3r_GUI_AboutDialog_hpp_
-
-#include "GUI.hpp"
 
 #include <wx/wx.h>
 #include <wx/intl.h>
@@ -62,6 +70,7 @@ class AboutDialog : public DPIDialog
     wxHtmlWindow*   m_html;
     wxStaticBitmap* m_logo;
     int             m_copy_rights_btn_id { wxID_ANY };
+    int             m_copy_version_btn_id { wxID_ANY };
 public:
     AboutDialog();
 
@@ -72,6 +81,7 @@ private:
     void onLinkClicked(wxHtmlLinkEvent &event);
     void onCloseDialog(wxEvent &);
     void onCopyrightBtn(wxEvent &);
+    void onCopyToClipboard(wxEvent&);
 };
 
 } // namespace GUI

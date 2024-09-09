@@ -1,8 +1,14 @@
+///|/ Copyright (c) Prusa Research 2017 - 2019 Tomáš Mészáros @tamasmeszaros, Vojtěch Bubník @bubnikv
+///|/ Copyright (c) 2017 Joseph Lenox @lordofhyphens
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_Format_objparser_hpp_
 #define slic3r_Format_objparser_hpp_
 
 #include <string>
 #include <vector>
+#include <istream>
 
 namespace ObjParser {
 
@@ -97,6 +103,7 @@ struct ObjData {
 };
 
 extern bool objparse(const char *path, ObjData &data);
+extern bool objparse(std::istream &stream, ObjData &data);
 
 extern bool objbinsave(const char *path, const ObjData &data);
 

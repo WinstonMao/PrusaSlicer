@@ -4,7 +4,7 @@
 # PrusaSlicer
 
 You may want to check the [PrusaSlicer project page](https://www.prusa3d.com/prusaslicer/).
-Prebuilt Windows, OSX and Linux binaries are available through the [git releases page](https://github.com/prusa3d/PrusaSlicer/releases) or from the [Prusa3D downloads page](https://www.prusa3d.com/drivers/).
+Prebuilt Windows, OSX and Linux binaries are available through the [git releases page](https://github.com/prusa3d/PrusaSlicer/releases) or from the [Prusa3D downloads page](https://www.prusa3d.com/drivers/). There are also [3rd party Linux builds available](https://github.com/prusa3d/PrusaSlicer/wiki/PrusaSlicer-on-Linux---binary-distributions).
 
 PrusaSlicer takes 3D models (STL, OBJ, AMF) and converts them into G-code
 instructions for FFF printers or PNG layers for mSLA 3D printers. It's
@@ -12,17 +12,14 @@ compatible with any modern printer based on the RepRap toolchain, including all
 those based on the Marlin, Prusa, Sprinter and Repetier firmware. It also works
 with Mach3, LinuxCNC and Machinekit controllers.
 
-PrusaSlicer is based on [Slic3r](https://github.com/Slic3r/Slic3r) by Alessandro Ranelucci and the RepRap community.
+PrusaSlicer is based on [Slic3r](https://github.com/Slic3r/Slic3r) by Alessandro Ranellucci and the RepRap community.
 
 See the [project homepage](https://www.prusa3d.com/slic3r-prusa-edition/) and
 the [documentation directory](doc/) for more information.
 
 ### What language is it written in?
 
-All user facing code is written in C++, and some legacy code as well as unit
-tests are written in Perl. Perl is not required for either development or use
-of PrusaSlicer.
-
+All user facing code is written in C++.
 The slicing core is the `libslic3r` library, which can be built and used in a standalone way.
 The command line interface is a thin wrapper over `libslic3r`.
 
@@ -49,7 +46,7 @@ Other major features are:
 * several infill patterns including honeycomb, spirals, Hilbert curves
 * support material, raft, brim, skirt
 * **standby temperature** and automatic wiping for multi-extruder printing
-* [customizable **G-code macros**](https://github.com/prusa3d/PrusaSlicer/wiki/Slic3r-Prusa-Edition-Macro-Language) and output filename with variable placeholders
+* [customizable **G-code macros**](https://github.com/prusa3d/PrusaSlicer/wiki/PrusaSlicer-Macro-Language) and output filename with variable placeholders
 * support for **post-processing scripts**
 * **cooling logic** controlling fan speed and dynamic print speed
 

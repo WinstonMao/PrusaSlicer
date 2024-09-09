@@ -1,10 +1,16 @@
+///|/ Copyright (c) Prusa Research 2019 - 2023 Lukáš Matěna @lukasmatena, Oleksandra Iushchenko @YuSanka, Enrico Turri @enricoturri1966, Vojtěch Bubník @bubnikv
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "GUI_ObjectLayers.hpp"
 #include "GUI_ObjectList.hpp"
 
 #include "OptionsGroup.hpp"
-#include "PresetBundle.hpp"
+#include "GUI_App.hpp"
+#include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Model.hpp"
 #include "GLCanvas3D.hpp"
+#include "Plater.hpp"
 
 #include <boost/algorithm/string.hpp>
 
@@ -25,13 +31,14 @@ ObjectLayers::ObjectLayers(wxWindow* parent) :
 
     // Legend for object layers
     for (const std::string col : { L("Start at height"), L("Stop at height"), L("Layer height") }) {
-        auto temp = new wxStaticText(m_parent, wxID_ANY, _(col), wxDefaultPosition, /*size*/wxDefaultSize, wxST_ELLIPSIZE_MIDDLE);
+        auto temp = new wxStaticText(m_parent, wxID_ANY, _(col), wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_MIDDLE);
         temp->SetBackgroundStyle(wxBG_STYLE_PAINT);
         temp->SetFont(wxGetApp().bold_font());
 
         m_grid_sizer->Add(temp);
     }
 
+    m_og->activate();
     m_og->sizer->Clear(true);
     m_og->sizer->Add(m_grid_sizer, 0, wxEXPAND | wxALL, wxOSX ? 0 : 5);
 
@@ -58,7 +65,7 @@ void ObjectLayers::select_editor(LayerRangeEditor* editor, const bool is_last_ed
     }    
 }
 
-wxSizer* ObjectLayers::create_layer(const t_layer_height_range& range) 
+wxSizer* ObjectLayers::create_layer(const t_layer_height_range& range, PlusMinusButton *delete_button, PlusMinusButton *add_button) 
 {
     const bool is_last_edited_range = range == m_selectable_range;
 
@@ -79,8 +86,8 @@ wxSizer* ObjectLayers::create_layer(const t_layer_height_range& range)
 
     // Add control for the "Min Z"
 
-    auto editor = new LayerRangeEditor(this, double_to_string(range.first), etMinZ,
-                                       set_focus_data, [range, update_focus_data, this](coordf_t min_z, bool enter_pressed)
+    auto editor = new LayerRangeEditor(this, double_to_string(range.first), etMinZ, set_focus_data, 
+        [range, update_focus_data, this, delete_button, add_button](coordf_t min_z, bool enter_pressed, bool dont_update_ui) 
     {
         if (fabs(min_z - range.first) < EPSILON) {
             m_selection_type = etUndef;
@@ -89,10 +96,14 @@ wxSizer* ObjectLayers::create_layer(const t_layer_height_range& range)
 
         // data for next focusing
         coordf_t max_z = min_z < range.second ? range.second : min_z + 0.5;
-        const t_layer_height_range& new_range = { min_z, max_z };
+        const t_layer_height_range new_range = { min_z, max_z };
+        if (delete_button)
+            delete_button->range = new_range;
+        if (add_button)
+            add_button->range = new_range;
         update_focus_data(new_range, etMinZ, enter_pressed);
 
-        return wxGetApp().obj_list()->edit_layer_range(range, new_range);
+        return wxGetApp().obj_list()->edit_layer_range(range, new_range, dont_update_ui);
     });
 
     select_editor(editor, is_last_edited_range);
@@ -100,8 +111,8 @@ wxSizer* ObjectLayers::create_layer(const t_layer_height_range& range)
 
     // Add control for the "Max Z"
 
-    editor = new LayerRangeEditor(this, double_to_string(range.second), etMaxZ,
-                                  set_focus_data, [range, update_focus_data, this](coordf_t max_z, bool enter_pressed)
+    editor = new LayerRangeEditor(this, double_to_string(range.second), etMaxZ, set_focus_data, 
+        [range, update_focus_data, this, delete_button, add_button](coordf_t max_z, bool enter_pressed, bool dont_update_ui)
     {
         if (fabs(max_z - range.second) < EPSILON || range.first > max_z) {
             m_selection_type = etUndef;
@@ -110,9 +121,13 @@ wxSizer* ObjectLayers::create_layer(const t_layer_height_range& range)
 
         // data for next focusing
         const t_layer_height_range& new_range = { range.first, max_z };
+        if (delete_button)
+            delete_button->range = new_range;
+        if (add_button)
+            add_button->range = new_range;
         update_focus_data(new_range, etMaxZ, enter_pressed);
 
-        return wxGetApp().obj_list()->edit_layer_range(range, new_range);
+        return wxGetApp().obj_list()->edit_layer_range(range, new_range, dont_update_ui);
     });
 
     select_editor(editor, is_last_edited_range);
@@ -120,9 +135,8 @@ wxSizer* ObjectLayers::create_layer(const t_layer_height_range& range)
 
     // Add control for the "Layer height"
 
-    editor = new LayerRangeEditor(this,
-                                double_to_string(m_object->layer_config_ranges[range].option("layer_height")->getFloat()),
-                             etLayerHeight, set_focus_data, [range, this](coordf_t layer_height, bool)
+    editor = new LayerRangeEditor(this, double_to_string(m_object->layer_config_ranges[range].option("layer_height")->getFloat()), etLayerHeight, set_focus_data,
+        [range](coordf_t layer_height, bool, bool)
     {
         return wxGetApp().obj_list()->edit_layer_range(range, layer_height);
     });
@@ -132,39 +146,38 @@ wxSizer* ObjectLayers::create_layer(const t_layer_height_range& range)
     auto sizer = new wxBoxSizer(wxHORIZONTAL);
     sizer->Add(editor);
 
-    auto temp = new wxStaticText(m_parent, wxID_ANY, _(L("mm")));
+    auto temp = new wxStaticText(m_parent, wxID_ANY, _L("mm"));
     temp->SetBackgroundStyle(wxBG_STYLE_PAINT);
     temp->SetFont(wxGetApp().normal_font());
-    sizer->Add(temp, 0, wxLEFT, wxGetApp().em_unit());
+    sizer->Add(temp, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, wxGetApp().em_unit());
 
     m_grid_sizer->Add(sizer);
 
     return sizer;
 }
-
+    
 void ObjectLayers::create_layers_list()
 {
-    for (const auto layer : m_object->layer_config_ranges)
-    {
+    for (const auto &layer : m_object->layer_config_ranges) {
         const t_layer_height_range& range = layer.first;
-        auto sizer = create_layer(range);
+        auto del_btn = new PlusMinusButton(m_parent, m_bmp_delete, range);
+        del_btn->SetToolTip(_L("Remove layer range"));
 
-        auto del_btn = new ScalableButton(m_parent, wxID_ANY, m_bmp_delete);
-        del_btn->SetToolTip(_(L("Remove layer range")));
+        auto add_btn = new PlusMinusButton(m_parent, m_bmp_add, range);
+        wxString tooltip = wxGetApp().obj_list()->can_add_new_range_after_current(range);
+        add_btn->SetToolTip(tooltip.IsEmpty() ? _L("Add layer range") : tooltip);
+        add_btn->Enable(tooltip.IsEmpty());
 
+        auto sizer = create_layer(range, del_btn, add_btn);
         sizer->Add(del_btn, 0, wxRIGHT | wxLEFT, em_unit(m_parent));
-
-        del_btn->Bind(wxEVT_BUTTON, [range](wxEvent &) {
-            wxGetApp().obj_list()->del_layer_range(range);
-        });
-
-        auto add_btn = new ScalableButton(m_parent, wxID_ANY, m_bmp_add);
-        add_btn->SetToolTip(_(L("Add layer range")));
-
         sizer->Add(add_btn);
 
-        add_btn->Bind(wxEVT_BUTTON, [range](wxEvent &) {
-            wxGetApp().obj_list()->add_layer_range_after_current(range);
+        del_btn->Bind(wxEVT_BUTTON, [del_btn](wxEvent &) {
+            wxGetApp().obj_list()->del_layer_range(del_btn->range);
+        });
+
+        add_btn->Bind(wxEVT_BUTTON, [add_btn](wxEvent &) {
+            wxGetApp().obj_list()->add_layer_range_after_current(add_btn->range);
         });
     }
 }
@@ -204,7 +217,7 @@ void ObjectLayers::update_layers_list()
     if (type & itLayerRoot)
         create_layers_list();
     else
-        create_layer(objects_ctrl->GetModel()->GetLayerRangeByItem(item));
+        create_layer(objects_ctrl->GetModel()->GetLayerRangeByItem(item), nullptr, nullptr);
 
     m_parent->Layout();
 }
@@ -225,44 +238,81 @@ void ObjectLayers::UpdateAndShow(const bool show)
 
 void ObjectLayers::msw_rescale()
 {
-    m_bmp_delete.msw_rescale();
-    m_bmp_add.msw_rescale();
+    //m_bmp_delete.msw_rescale();
+    //m_bmp_add.msw_rescale();
 
-    m_grid_sizer->SetHGap(wxGetApp().em_unit());
+    //m_grid_sizer->SetHGap(wxGetApp().em_unit());
+
+    //// rescale edit-boxes
+    //const int cells_cnt = m_grid_sizer->GetCols() * m_grid_sizer->GetEffectiveRowsCount();
+    //for (int i = 0; i < cells_cnt; ++i) {
+    //    const wxSizerItem* item = m_grid_sizer->GetItem(i);
+    //    if (item->IsWindow()) {
+    //        LayerRangeEditor* editor = dynamic_cast<LayerRangeEditor*>(item->GetWindow());
+    //        if (editor != nullptr)
+    //            editor->msw_rescale();
+    //    }
+    //    else if (item->IsSizer()) // case when we have editor with buttons
+    //    {
+    //        wxSizerItem* e_item = item->GetSizer()->GetItem(size_t(0)); // editor
+    //        if (e_item->IsWindow()) {
+    //            LayerRangeEditor* editor = dynamic_cast<LayerRangeEditor*>(e_item->GetWindow());
+    //            if (editor != nullptr)
+    //                editor->msw_rescale();
+    //        }
+
+    //        if (item->GetSizer()->GetItemCount() > 2) // if there are Add/Del buttons
+    //            for (size_t btn : {2, 3}) { // del_btn, add_btn
+    //                wxSizerItem* b_item = item->GetSizer()->GetItem(btn);
+    //                if (b_item->IsWindow()) {
+    //                    auto button = dynamic_cast<PlusMinusButton*>(b_item->GetWindow());
+    //                    if (button != nullptr)
+    //                        button->msw_rescale();
+    //                }
+    //            }
+    //    }
+    //}
+    m_grid_sizer->Layout();
+}
+
+void ObjectLayers::sys_color_changed()
+{
+    m_bmp_delete.sys_color_changed();
+    m_bmp_add.sys_color_changed();
 
     // rescale edit-boxes
     const int cells_cnt = m_grid_sizer->GetCols() * m_grid_sizer->GetEffectiveRowsCount();
-    for (int i = 0; i < cells_cnt; i++)
-    {
+    for (int i = 0; i < cells_cnt; ++i) {
         const wxSizerItem* item = m_grid_sizer->GetItem(i);
-        if (item->IsWindow())
-        {
-            LayerRangeEditor* editor = dynamic_cast<LayerRangeEditor*>(item->GetWindow());
-            if (editor != nullptr)
-                editor->msw_rescale();
-        }
-        else if (item->IsSizer()) // case when we have editor with buttons
-        {
-            wxSizerItem* e_item = item->GetSizer()->GetItem(size_t(0)); // editor
-            if (e_item->IsWindow()) {
-                LayerRangeEditor* editor = dynamic_cast<LayerRangeEditor*>(e_item->GetWindow());
-                if (editor != nullptr)
-                    editor->msw_rescale();
-            }
-
-            const std::vector<size_t> btns = {2, 3};  // del_btn, add_btn
-            for (auto btn : btns)
-            {
+        if (item->IsSizer()) {// case when we have editor with buttons
+            for (size_t btn : {2, 3}) { // del_btn, add_btn
                 wxSizerItem* b_item = item->GetSizer()->GetItem(btn);
-                if (b_item->IsWindow()) {
-                    ScalableButton* button = dynamic_cast<ScalableButton*>(b_item->GetWindow());
+                if (b_item && b_item->IsWindow()) {
+                    auto button = dynamic_cast<PlusMinusButton*>(b_item->GetWindow());
                     if (button != nullptr)
-                        button->msw_rescale();
-                }                
+                        button->sys_color_changed();
+                }
             }
         }
     }
-    m_grid_sizer->Layout();
+
+#ifdef _WIN32
+    m_og->sys_color_changed();
+    for (int i = 0; i < cells_cnt; ++i) {
+        const wxSizerItem* item = m_grid_sizer->GetItem(i);
+        if (item->IsWindow()) {
+            if (LayerRangeEditor* editor = dynamic_cast<LayerRangeEditor*>(item->GetWindow()))
+                wxGetApp().UpdateDarkUI(editor);
+        }
+        else if (item->IsSizer()) {// case when we have editor with buttons
+            if (wxSizerItem* e_item = item->GetSizer()->GetItem(size_t(0)); e_item->IsWindow()) {
+                if (LayerRangeEditor* editor = dynamic_cast<LayerRangeEditor*>(e_item->GetWindow()))
+                    wxGetApp().UpdateDarkUI(editor);
+            }
+        }
+    }
+#endif
+
 }
 
 void ObjectLayers::reset_selection()
@@ -275,15 +325,20 @@ LayerRangeEditor::LayerRangeEditor( ObjectLayers* parent,
                                     const wxString& value,
                                     EditorType type,
                                     std::function<void(EditorType)> set_focus_data_fn,
-                                    std::function<bool(coordf_t, bool enter_pressed)>   edit_fn
+                                    std::function<bool(coordf_t, bool, bool)>   edit_fn
                                     ) :
     m_valid_value(value),
     m_type(type),
     m_set_focus_data(set_focus_data_fn),
     wxTextCtrl(parent->m_parent, wxID_ANY, value, wxDefaultPosition, 
-               wxSize(8 * em_unit(parent->m_parent), wxDefaultCoord), wxTE_PROCESS_ENTER)
+               wxSize(8 * em_unit(parent->m_parent), wxDefaultCoord), wxTE_PROCESS_ENTER
+#ifdef _WIN32
+        | wxBORDER_SIMPLE
+#endif
+    )
 {
     this->SetFont(wxGetApp().normal_font());
+    wxGetApp().UpdateDarkUI(this);
 
     // Reset m_enter_pressed flag to _false_, when value is editing
     this->Bind(wxEVT_TEXT, [this](wxEvent&) { m_enter_pressed = false; }, this->GetId());
@@ -291,18 +346,26 @@ LayerRangeEditor::LayerRangeEditor( ObjectLayers* parent,
     this->Bind(wxEVT_TEXT_ENTER, [this, edit_fn](wxEvent&)
     {
         m_enter_pressed     = true;
-        // If LayersList wasn't updated/recreated, we can call wxEVT_KILL_FOCUS.Skip()
-        if (m_type&etLayerHeight) {
-            if (!edit_fn(get_value(), true))
+        // Workaround! Under Linux we have to use CallAfter() to avoid crash after pressing ENTER key
+        // see #7531, #8055, #8408
+#ifdef __linux__
+        wxTheApp->CallAfter([this, edit_fn]() {
+#endif
+            // If LayersList wasn't updated/recreated, we can call wxEVT_KILL_FOCUS.Skip()
+            if (m_type & etLayerHeight) {
+                if (!edit_fn(get_value(), true, false))
+                    SetValue(m_valid_value);
+                else
+                    m_valid_value = double_to_string(get_value());
+                m_call_kill_focus = true;
+            }
+            else if (!edit_fn(get_value(), true, false)) {
                 SetValue(m_valid_value);
-            else
-                m_valid_value = double_to_string(get_value());
-            m_call_kill_focus = true;
-        }
-        else if (!edit_fn(get_value(), true)) {
-            SetValue(m_valid_value);
-            m_call_kill_focus = true;
-        }
+                m_call_kill_focus = true;
+            }
+#ifdef __linux__
+        });
+#endif 
     }, this->GetId());
 
     this->Bind(wxEVT_KILL_FOCUS, [this, edit_fn](wxFocusEvent& e)
@@ -319,13 +382,13 @@ LayerRangeEditor::LayerRangeEditor( ObjectLayers* parent,
 #endif // not __WXGTK__
             // If LayersList wasn't updated/recreated, we should call e.Skip()
             if (m_type & etLayerHeight) {
-                if (!edit_fn(get_value(), false))
+                if (!edit_fn(get_value(), false, dynamic_cast<ObjectLayers::PlusMinusButton*>(e.GetWindow()) != nullptr))
                     SetValue(m_valid_value);
                 else
                     m_valid_value = double_to_string(get_value());
                 e.Skip();
             }
-            else if (!edit_fn(get_value(), false)) {
+            else if (!edit_fn(get_value(), false, dynamic_cast<ObjectLayers::PlusMinusButton*>(e.GetWindow()) != nullptr)) {
                 SetValue(m_valid_value);
                 e.Skip();
             } 
@@ -365,17 +428,16 @@ coordf_t LayerRangeEditor::get_value()
     wxString str = GetValue();
 
     coordf_t layer_height;
-    // Replace the first occurence of comma in decimal number.
-    str.Replace(",", ".", false);
+    const char dec_sep = is_decimal_separator_point() ? '.' : ',';
+    const char dec_sep_alt = dec_sep == '.' ? ',' : '.';
+    // Replace the first incorrect separator in decimal number.
+    str.Replace(dec_sep_alt, dec_sep, false);
+
     if (str == ".")
         layer_height = 0.0;
-    else
-    {
-        if (!str.ToCDouble(&layer_height) || layer_height < 0.0f)
-        {
-            show_error(m_parent, _(L("Invalid numeric input.")));
-            SetValue(double_to_string(layer_height));
-        }
+    else if (!str.ToDouble(&layer_height) || layer_height < 0.0f) {
+        show_error(m_parent, _L("Invalid numeric input."));
+        assert(m_valid_value.ToDouble(&layer_height));
     }
 
     return layer_height;

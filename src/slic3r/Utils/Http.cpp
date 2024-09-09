@@ -1,3 +1,9 @@
+///|/ Copyright (c) Prusa Research 2018 - 2023 David Kocík @kocikdav, Lukáš Matěna @lukasmatena, Vojtěch Bubník @bubnikv, Tomáš Mészáros @tamasmeszaros, Oleksandra Iushchenko @YuSanka, Vojtěch Král @vojtechkral
+///|/ Copyright (c) 2020 Manuel Coenen
+///|/ Copyright (c) 2018 Martin Loidl @LoidlM
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "Http.hpp"
 
 #include <cstdlib>
@@ -7,12 +13,21 @@
 #include <sstream>
 #include <exception>
 #include <boost/filesystem/fstream.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/filesystem.hpp>
 #include <boost/format.hpp>
+#include <boost/log/trivial.hpp>
 
 #include <curl/curl.h>
 
-#include "libslic3r/libslic3r.h"
-#include "libslic3r/Utils.hpp"
+#ifdef OPENSSL_CERT_OVERRIDE
+#include <openssl/x509.h>
+#endif
+
+#include <libslic3r/libslic3r.h>
+#include <libslic3r/Utils.hpp>
+#include <slic3r/GUI/I18N.hpp>
+#include <slic3r/GUI/format.hpp>
 
 namespace fs = boost::filesystem;
 
@@ -22,18 +37,80 @@ namespace Slic3r {
 
 // Private
 
-class CurlGlobalInit
+struct CurlGlobalInit
 {
-	static const CurlGlobalInit instance;
+    static std::unique_ptr<CurlGlobalInit> instance;
+    std::string message;
 
-	CurlGlobalInit()  { ::curl_global_init(CURL_GLOBAL_DEFAULT); }
+	CurlGlobalInit()
+    {
+#ifdef OPENSSL_CERT_OVERRIDE // defined if SLIC3R_STATIC=ON
+
+        // Look for a set of distro specific directories. Don't change the
+        // order: https://bugzilla.redhat.com/show_bug.cgi?id=1053882
+        static const char * CA_BUNDLES[] = {
+            "/etc/pki/tls/certs/ca-bundle.crt",   // Fedora/RHEL 6
+            "/etc/ssl/certs/ca-certificates.crt", // Debian/Ubuntu/Gentoo etc.
+            "/usr/share/ssl/certs/ca-bundle.crt",
+            "/usr/local/share/certs/ca-root-nss.crt", // FreeBSD
+            "/etc/ssl/cert.pem",
+            "/etc/ssl/ca-bundle.pem"              // OpenSUSE Tumbleweed
+        };
+
+        namespace fs = boost::filesystem;
+        // Env var name for the OpenSSL CA bundle (SSL_CERT_FILE nomally)
+        const char *const SSL_CA_FILE = X509_get_default_cert_file_env();
+        const char * ssl_cafile = ::getenv(SSL_CA_FILE);
+
+        if (!ssl_cafile)
+            ssl_cafile = X509_get_default_cert_file();
+
+        int replace = true;
+        if (!ssl_cafile || !fs::exists(fs::path(ssl_cafile))) {
+            const char * bundle = nullptr;
+            for (const char * b : CA_BUNDLES) {
+                if (fs::exists(fs::path(b))) {
+                    ::setenv(SSL_CA_FILE, bundle = b, replace);
+                    break;
+                }
+            }
+
+            if (!bundle)
+                message = _u8L("Could not detect system SSL certificate store. "
+                               "PrusaSlicer will be unable to establish secure "
+                               "network connections.");
+            else
+                message = Slic3r::GUI::format(
+					_L("PrusaSlicer detected system SSL certificate store in: %1%"),
+                    bundle);
+
+            message += "\n" + Slic3r::GUI::format(
+				_L("To specify the system certificate store manually, please "
+                   "set the %1% environment variable to the correct CA bundle "
+                   "and restart the application."),
+                SSL_CA_FILE);
+        }
+
+#endif // OPENSSL_CERT_OVERRIDE
+
+        if (CURLcode ec = ::curl_global_init(CURL_GLOBAL_DEFAULT)) {
+            message += _u8L("CURL init has failed. PrusaSlicer will be unable to establish "
+                            "network connections. See logs for additional details.");
+
+            BOOST_LOG_TRIVIAL(error) << ::curl_easy_strerror(ec);
+        }
+    }
+
 	~CurlGlobalInit() { ::curl_global_cleanup(); }
 };
+
+std::unique_ptr<CurlGlobalInit> CurlGlobalInit::instance;
 
 struct Http::priv
 {
 	enum {
 		DEFAULT_TIMEOUT_CONNECT = 10,
+        DEFAULT_TIMEOUT_MAX = 0,
 		DEFAULT_SIZE_LIMIT = 5 * 1024 * 1024,
 	};
 
@@ -50,11 +127,13 @@ struct Http::priv
 	std::string error_buffer;    // Used for CURLOPT_ERRORBUFFER
 	size_t limit;
 	bool cancel;
+    std::unique_ptr<fs::ifstream> putFile;
 
 	std::thread io_thread;
 	Http::CompleteFn completefn;
 	Http::ErrorFn errorfn;
 	Http::ProgressFn progressfn;
+	Http::IPResolveFn ipresolvefn;
 
 	priv(const std::string &url);
 	~priv();
@@ -66,8 +145,12 @@ struct Http::priv
 	static size_t form_file_read_cb(char *buffer, size_t size, size_t nitems, void *userp);
 
 	void set_timeout_connect(long timeout);
+    void set_timeout_max(long timeout);
 	void form_add_file(const char *name, const fs::path &path, const char* filename);
 	void set_post_body(const fs::path &path);
+	void set_post_body(const std::string &body);
+	void set_put_body(const fs::path &path);
+	void set_range(const std::string& range);
 
 	std::string curl_error(CURLcode curlcode);
 	std::string body_size_error();
@@ -83,14 +166,18 @@ Http::priv::priv(const std::string &url)
 	, limit(0)
 	, cancel(false)
 {
+    Http::tls_global_init();
+
 	if (curl == nullptr) {
-		throw std::runtime_error(std::string("Could not construct Curl object"));
+		throw Slic3r::RuntimeError(std::string("Could not construct Curl object"));
 	}
 
 	set_timeout_connect(DEFAULT_TIMEOUT_CONNECT);
+    set_timeout_max(DEFAULT_TIMEOUT_MAX);
 	::curl_easy_setopt(curl, CURLOPT_URL, url.c_str());   // curl makes a copy internally
 	::curl_easy_setopt(curl, CURLOPT_USERAGENT, SLIC3R_APP_NAME "/" SLIC3R_VERSION);
 	::curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, &error_buffer.front());
+	::curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
 }
 
 Http::priv::~priv()
@@ -102,7 +189,7 @@ Http::priv::~priv()
 
 bool Http::priv::ca_file_supported(::CURL *curl)
 {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
 	bool res = false;
 #else
 	bool res = true;
@@ -115,6 +202,7 @@ bool Http::priv::ca_file_supported(::CURL *curl)
 	if (::curl_easy_getinfo(curl, CURLINFO_TLS_SSL_PTR, &tls) == CURLE_OK) {
 		if (tls->backend == CURLSSLBACKEND_SCHANNEL || tls->backend == CURLSSLBACKEND_DARWINSSL) {
 			// With Windows and OS X native SSL support, cert files cannot be set
+            // DK: OSX is now not building CURL and links system one, thus we do not know which backend is installed. Still, false will be returned since the ifdef at the begining if this function.
 			res = false;
 		}
 	}
@@ -128,7 +216,6 @@ size_t Http::priv::writecb(void *data, size_t size, size_t nmemb, void *userp)
 	auto self = static_cast<priv*>(userp);
 	const char *cdata = static_cast<char*>(data);
 	const size_t realsize = size * nmemb;
-
 	const size_t limit = self->limit > 0 ? self->limit : DEFAULT_SIZE_LIMIT;
 	if (self->buffer.size() + realsize > limit) {
 		// This makes curl_easy_perform return CURLE_WRITE_ERROR
@@ -146,7 +233,7 @@ int Http::priv::xfercb(void *userp, curl_off_t dltotal, curl_off_t dlnow, curl_o
 	bool cb_cancel = false;
 
 	if (self->progressfn) {
-		Progress progress(dltotal, dlnow, ultotal, ulnow);
+		Progress progress(dltotal, dlnow, ultotal, ulnow, self->buffer);
 		self->progressfn(progress, cb_cancel);
 	}
 
@@ -178,6 +265,11 @@ void Http::priv::set_timeout_connect(long timeout)
 	::curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, timeout);
 }
 
+void Http::priv::set_timeout_max(long timeout)
+{
+    ::curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout);
+}
+
 void Http::priv::form_add_file(const char *name, const fs::path &path, const char* filename)
 {
 	// We can't use CURLFORM_FILECONTENT, because curl doesn't support Unicode filenames on Windows
@@ -205,11 +297,33 @@ void Http::priv::form_add_file(const char *name, const fs::path &path, const cha
 	}
 }
 
+//FIXME may throw! Is the caller aware of it?
 void Http::priv::set_post_body(const fs::path &path)
 {
 	std::ifstream file(path.string());
 	std::string file_content { std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>() };
-	postfields = file_content;
+	postfields = std::move(file_content);
+}
+
+void Http::priv::set_post_body(const std::string &body)
+{
+	postfields = body;
+}
+
+void Http::priv::set_put_body(const fs::path &path)
+{
+	boost::system::error_code ec;
+	boost::uintmax_t filesize = file_size(path, ec);
+	if (!ec) {
+        putFile = std::make_unique<fs::ifstream>(path, std::ios::binary);
+        ::curl_easy_setopt(curl, CURLOPT_READDATA, (void *) (putFile.get()));
+		::curl_easy_setopt(curl, CURLOPT_INFILESIZE, filesize);
+	}
+}
+
+void Http::priv::set_range(const std::string& range)
+{
+	::curl_easy_setopt(curl, CURLOPT_RANGE, range.c_str());
 }
 
 std::string Http::priv::curl_error(CURLcode curlcode)
@@ -263,11 +377,13 @@ void Http::priv::http_perform()
 
 	CURLcode res = ::curl_easy_perform(curl);
 
+    putFile.reset();
+
 	if (res != CURLE_OK) {
 		if (res == CURLE_ABORTED_BY_CALLBACK) {
 			if (cancel) {
 				// The abort comes from the request being cancelled programatically
-				Progress dummyprogress(0, 0, 0, 0);
+				Progress dummyprogress(0, 0, 0, 0, std::string());
 				bool cancel = true;
 				if (progressfn) { progressfn(dummyprogress, cancel); }
 			} else {
@@ -288,6 +404,13 @@ void Http::priv::http_perform()
 			if (errorfn) { errorfn(std::move(buffer), std::string(), http_status); }
 		} else {
 			if (completefn) { completefn(std::move(buffer), http_status); }
+			if (ipresolvefn) {
+				char* ct;
+				res = curl_easy_getinfo(curl, CURLINFO_PRIMARY_IP, &ct);
+				if ((CURLE_OK == res) && ct) {
+					ipresolvefn(ct);
+				}
+			}
 		}
 	}
 }
@@ -301,6 +424,7 @@ Http::Http(Http &&other) : p(std::move(other.p)) {}
 
 Http::~Http()
 {
+    assert(! p || ! p->putFile);
 	if (p && p->io_thread.joinable()) {
 		p->io_thread.detach();
 	}
@@ -314,9 +438,22 @@ Http& Http::timeout_connect(long timeout)
 	return *this;
 }
 
+Http& Http::timeout_max(long timeout)
+{
+    if (timeout < 1) { timeout = priv::DEFAULT_TIMEOUT_MAX; }
+    if (p) { p->set_timeout_max(timeout); }
+    return *this;
+}
+
 Http& Http::size_limit(size_t sizeLimit)
 {
 	if (p) { p->limit = sizeLimit; }
+	return *this;
+}
+
+Http& Http::set_range(const std::string& range)
+{
+	if (p) { p->set_range(range); }
 	return *this;
 }
 
@@ -341,6 +478,25 @@ Http& Http::remove_header(std::string name)
 	}
 
 	return *this;
+}
+
+// Authorization by HTTP digest, based on RFC2617.
+Http& Http::auth_digest(const std::string &user, const std::string &password)
+{
+	curl_easy_setopt(p->curl, CURLOPT_USERNAME, user.c_str());
+	curl_easy_setopt(p->curl, CURLOPT_PASSWORD, password.c_str());
+	curl_easy_setopt(p->curl, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
+
+	return *this;
+}
+
+Http& Http::auth_basic(const std::string &user, const std::string &password)
+{
+    curl_easy_setopt(p->curl, CURLOPT_USERNAME, user.c_str());
+    curl_easy_setopt(p->curl, CURLOPT_PASSWORD, password.c_str());
+    curl_easy_setopt(p->curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+
+    return *this;
 }
 
 Http& Http::ca_file(const std::string &name)
@@ -377,9 +533,39 @@ Http& Http::form_add_file(const std::string &name, const fs::path &path, const s
 	return *this;
 }
 
+#ifdef WIN32
+// Tells libcurl to ignore certificate revocation checks in case of missing or offline distribution points for those SSL backends where such behavior is present. 
+// This option is only supported for Schannel (the native Windows SSL library).
+Http& Http::ssl_revoke_best_effort(bool set)
+{
+	if(p && set){
+		::curl_easy_setopt(p->curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_REVOKE_BEST_EFFORT);
+	}
+	return *this;
+}
+#endif // WIN32
+
 Http& Http::set_post_body(const fs::path &path)
 {
 	if (p) { p->set_post_body(path);}
+	return *this;
+}
+
+Http& Http::set_post_body(const std::string &body)
+{
+	if (p) { p->set_post_body(body); }
+	return *this;
+}
+
+Http& Http::set_referer(const std::string& referer)
+{
+	if (p) { ::curl_easy_setopt(p->curl, CURLOPT_REFERER, referer.c_str()); }
+	return *this;
+}
+
+Http& Http::set_put_body(const fs::path &path)
+{
+	if (p) { p->set_put_body(path);}
 	return *this;
 }
 
@@ -398,6 +584,28 @@ Http& Http::on_error(ErrorFn fn)
 Http& Http::on_progress(ProgressFn fn)
 {
 	if (p) { p->progressfn = std::move(fn); }
+	return *this;
+}
+
+Http& Http::on_ip_resolve(IPResolveFn fn)
+{
+	if (p) { p->ipresolvefn = std::move(fn); }
+	return *this;
+}
+
+Http& Http::cookie_file(const std::string& file_path)
+{
+	if (p) {
+		::curl_easy_setopt(p->curl, CURLOPT_COOKIEFILE, file_path.c_str());
+	}
+	return *this;
+}
+
+Http& Http::cookie_jar(const std::string& file_path)
+{
+	if (p) {
+		::curl_easy_setopt(p->curl, CURLOPT_COOKIEJAR, file_path.c_str());
+	}
 	return *this;
 }
 
@@ -427,7 +635,7 @@ void Http::cancel()
 
 Http Http::get(std::string url)
 {
-	return std::move(Http{std::move(url)});
+    return Http{std::move(url)};
 }
 
 Http Http::post(std::string url)
@@ -437,12 +645,38 @@ Http Http::post(std::string url)
 	return http;
 }
 
+Http Http::put(std::string url)
+{
+	Http http{std::move(url)};
+	curl_easy_setopt(http.p->curl, CURLOPT_UPLOAD, 1L);
+	return http;
+}
+
 bool Http::ca_file_supported()
 {
 	::CURL *curl = ::curl_easy_init();
 	bool res = priv::ca_file_supported(curl);
 	if (curl != nullptr) { ::curl_easy_cleanup(curl); }
-	return res;
+    return res;
+}
+
+std::string Http::tls_global_init()
+{
+    if (!CurlGlobalInit::instance)
+        CurlGlobalInit::instance = std::make_unique<CurlGlobalInit>();
+
+    return CurlGlobalInit::instance->message;
+}
+
+std::string Http::tls_system_cert_store()
+{
+    std::string ret;
+
+#ifdef OPENSSL_CERT_OVERRIDE
+    ret = ::getenv(X509_get_default_cert_file_env());
+#endif
+
+    return ret;
 }
 
 std::string Http::url_encode(const std::string &str)

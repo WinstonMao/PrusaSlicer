@@ -1,9 +1,12 @@
+///|/ Copyright (c) Prusa Research 2019 - 2021 Vojtěch Bubník @bubnikv, Lukáš Matěna @lukasmatena, Enrico Turri @enricoturri1966
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_ThumbnailData_hpp_
 #define slic3r_ThumbnailData_hpp_
 
-#if ENABLE_THUMBNAIL_GENERATOR
-
 #include <vector>
+#include "libslic3r/Point.hpp"
 
 namespace Slic3r {
 
@@ -20,8 +23,19 @@ struct ThumbnailData
     bool is_valid() const;
 };
 
-} // namespace Slic3r
+using ThumbnailsList = std::vector<ThumbnailData>;
 
-#endif // ENABLE_THUMBNAIL_GENERATOR
+struct ThumbnailsParams
+{
+	const Vec2ds 	sizes;
+	bool 			printable_only;
+	bool 			parts_only;
+	bool 			show_bed;
+	bool 			transparent_background;
+};
+
+typedef std::function<ThumbnailsList(const ThumbnailsParams&)> ThumbnailsGeneratorCallback;
+
+} // namespace Slic3r
 
 #endif // slic3r_ThumbnailData_hpp_

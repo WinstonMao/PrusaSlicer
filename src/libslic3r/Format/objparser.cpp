@@ -1,11 +1,33 @@
+///|/ Copyright (c) Prusa Research 2017 - 2021 Lukáš Matěna @lukasmatena, Vojtěch Bubník @bubnikv, Tomáš Mészáros @tamasmeszaros, Enrico Turri @enricoturri1966
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include <stdlib.h>
 #include <string.h>
 
+#include <boost/log/trivial.hpp>
 #include <boost/nowide/cstdio.hpp>
 
 #include "objparser.hpp"
 
+#include "libslic3r/LocalesUtils.hpp"
+#include "fast_float/fast_float.h"
+
 namespace ObjParser {
+
+// To fix issues with obj loading on macOS Sonoma, we use the following function instead of strtod that
+// was used before. Apparently the locales are not handled as they should. We already saw this before in
+// https://github.com/prusa3d/PrusaSlicer/issues/10380.
+static double strtod_clocale(const char* str, char const** str_end)
+{
+	double val = 0.;
+	auto [pend, ec] = fast_float::from_chars(str, *str_end, val);
+	if (pend != str && ec != std::errc::result_out_of_range)
+		*str_end = pend; // success
+	else
+		*str_end = str;
+	return val;
+}
 
 static bool obj_parseline(const char *line, ObjData &data)
 {
@@ -13,6 +35,8 @@ static bool obj_parseline(const char *line, ObjData &data)
 
 	if (*line == 0)
 		return true;
+
+    assert(Slic3r::is_decimal_separator_point());
 
 	// Ignore whitespaces at the beginning of the line.
 	//FIXME is this a good idea?
@@ -36,15 +60,15 @@ static bool obj_parseline(const char *line, ObjData &data)
 			if (c2 != ' ' && c2 != '\t')
 				return false;
 			EATWS();
-			char *endptr = 0;
-			double u = strtod(line, &endptr);
+			const char *endptr = 0;
+			double u = strtod_clocale(line, &endptr);
 			if (endptr == 0 || (*endptr != ' ' && *endptr != '\t'))
 				return false;
 			line = endptr;
 			EATWS();
 			double v = 0;
 			if (*line != 0) {
-				v = strtod(line, &endptr);
+				v = strtod_clocale(line, &endptr);
 				if (endptr == 0 || (*endptr != ' ' && *endptr != '\t' && *endptr != 0))
 					return false;
 				line = endptr;
@@ -52,7 +76,7 @@ static bool obj_parseline(const char *line, ObjData &data)
 			}
 			double w = 0;
 			if (*line != 0) {
-				w = strtod(line, &endptr);
+				w = strtod_clocale(line, &endptr);
 				if (endptr == 0 || (*endptr != ' ' && *endptr != '\t' && *endptr != 0))
 					return false;
 				line = endptr;
@@ -73,18 +97,18 @@ static bool obj_parseline(const char *line, ObjData &data)
 			if (c2 != ' ' && c2 != '\t')
 				return false;
 			EATWS();
-			char *endptr = 0;
-			double x = strtod(line, &endptr);
+			const char *endptr = 0;
+			double x = strtod_clocale(line, &endptr);
 			if (endptr == 0 || (*endptr != ' ' && *endptr != '\t'))
 				return false;
 			line = endptr;
 			EATWS();
-			double y = strtod(line, &endptr);
+			double y = strtod_clocale(line, &endptr);
 			if (endptr == 0 || (*endptr != ' ' && *endptr != '\t'))
 				return false;
 			line = endptr;
 			EATWS();
-			double z = strtod(line, &endptr);
+			double z = strtod_clocale(line, &endptr);
 			if (endptr == 0 || (*endptr != ' ' && *endptr != '\t' && *endptr != 0))
 				return false;
 			line = endptr;
@@ -103,20 +127,20 @@ static bool obj_parseline(const char *line, ObjData &data)
 			if (c2 != ' ' && c2 != '\t')
 				return false;
 			EATWS();
-			char *endptr = 0;
-			double u = strtod(line, &endptr);
+			const char *endptr = 0;
+			double u = strtod_clocale(line, &endptr);
 			if (endptr == 0 || (*endptr != ' ' && *endptr != '\t' && *endptr != 0))
 				return false;
 			line = endptr;
 			EATWS();
-			double v = strtod(line, &endptr);
+			double v = strtod_clocale(line, &endptr);
 			if (endptr == 0 || (*endptr != ' ' && *endptr != '\t' && *endptr != 0))
 				return false;
 			line = endptr;
 			EATWS();
 			double w = 0;
 			if (*line != 0) {
-				w = strtod(line, &endptr);
+				w = strtod_clocale(line, &endptr);
 				if (endptr == 0 || (*endptr != ' ' && *endptr != '\t' && *endptr != 0))
 					return false;
 				line = endptr;
@@ -135,25 +159,25 @@ static bool obj_parseline(const char *line, ObjData &data)
 			if (c2 != ' ' && c2 != '\t')
 				return false;
 			EATWS();
-			char *endptr = 0;
-			double x = strtod(line, &endptr);
+			const char *endptr = 0;
+			double x = strtod_clocale(line, &endptr);
 			if (endptr == 0 || (*endptr != ' ' && *endptr != '\t'))
 				return false;
 			line = endptr;
 			EATWS();
-			double y = strtod(line, &endptr);
+			double y = strtod_clocale(line, &endptr);
 			if (endptr == 0 || (*endptr != ' ' && *endptr != '\t'))
 				return false;
 			line = endptr;
 			EATWS();
-			double z = strtod(line, &endptr);
+			double z = strtod_clocale(line, &endptr);
 			if (endptr == 0 || (*endptr != ' ' && *endptr != '\t' && *endptr != 0))
 				return false;
 			line = endptr;
 			EATWS();
 			double w = 1.0;
 			if (*line != 0) {
-				w = strtod(line, &endptr);
+				w = strtod_clocale(line, &endptr);
 				if (endptr == 0 || (*endptr != ' ' && *endptr != '\t' && *endptr != 0))
 					return false;
 				line = endptr;
@@ -312,7 +336,7 @@ static bool obj_parseline(const char *line, ObjData &data)
 		break;
 	}
 	default:
-		printf("ObjParser: Unknown command: %c\r\n", c1);
+    	BOOST_LOG_TRIVIAL(error) << "ObjParser: Unknown command: " << c1;
 		break;
 	}
 
@@ -321,6 +345,8 @@ static bool obj_parseline(const char *line, ObjData &data)
 
 bool objparse(const char *path, ObjData &data)
 {
+    Slic3r::CNumericLocalesSetter locales_setter;
+
 	FILE *pFile = boost::nowide::fopen(path, "rt");
 	if (pFile == 0)
 		return false;
@@ -338,21 +364,60 @@ bool objparse(const char *path, ObjData &data)
 					char *c = buf + lastLine;
 					while (*c == ' ' || *c == '\t')
 						++ c;
+					//FIXME check the return value and exit on error?
+					// Will it break parsing of some obj files?
 					obj_parseline(c, data);
 					lastLine = i + 1;
 				}
 			lenPrev = len - lastLine;
+			if (lenPrev > 65536) {
+		    	BOOST_LOG_TRIVIAL(error) << "ObjParser: Excessive line length";
+				::fclose(pFile);
+				return false;
+			}
 			memmove(buf, buf + lastLine, lenPrev);
 		}
     }
     catch (std::bad_alloc&) {
-        printf("Out of memory\r\n");
+    	BOOST_LOG_TRIVIAL(error) << "ObjParser: Out of memory";
 	}
 	::fclose(pFile);
 
 	// printf("vertices: %d\r\n", data.vertices.size() / 4);
 	// printf("coords: %d\r\n", data.coordinates.size());
 	return true;
+}
+
+bool objparse(std::istream &stream, ObjData &data)
+{
+    Slic3r::CNumericLocalesSetter locales_setter;
+    
+    try {
+        char buf[65536 * 2];
+        size_t len = 0;
+        size_t lenPrev = 0;
+        while ((len = size_t(stream.read(buf + lenPrev, 65536).gcount())) != 0) {
+            len += lenPrev;
+            size_t lastLine = 0;
+            for (size_t i = 0; i < len; ++ i)
+                if (buf[i] == '\r' || buf[i] == '\n') {
+                    buf[i] = 0;
+                    char *c = buf + lastLine;
+                    while (*c == ' ' || *c == '\t')
+                        ++ c;
+                    obj_parseline(c, data);
+                    lastLine = i + 1;
+                }
+            lenPrev = len - lastLine;
+            memmove(buf, buf + lastLine, lenPrev);
+        }
+    }
+    catch (std::bad_alloc&) {
+    	BOOST_LOG_TRIVIAL(error) << "ObjParser: Out of memory";
+    	return false;
+    }
+    
+    return true;
 }
 
 template<typename T> 
@@ -420,7 +485,7 @@ bool loadvector(FILE *pFile, std::vector<std::string> &v)
 		if (::fread(&len, sizeof(len), 1, pFile) != 1)
 			return false;
 		std::string s(" ", len);
-		if (::fread(const_cast<char*>(s.c_str()), 1, len, pFile) != len)
+		if (::fread(s.data(), 1, len, pFile) != len)
 			return false;
 		v.push_back(std::move(s));
 	}
@@ -442,7 +507,7 @@ bool loadvectornameidx(FILE *pFile, std::vector<T> &v)
 		if (::fread(&len, sizeof(len), 1, pFile) != 1)
 			return false;
 		v[i].name.assign(" ", len);
-		if (::fread(const_cast<char*>(v[i].name.c_str()), 1, len, pFile) != len)
+		if (::fread(v[i].name.data(), 1, len, pFile) != len)
 			return false;
 	}
 	return true;

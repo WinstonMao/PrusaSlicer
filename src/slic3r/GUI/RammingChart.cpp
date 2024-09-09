@@ -1,8 +1,13 @@
+///|/ Copyright (c) Prusa Research 2018 - 2021 Oleksandra Iushchenko @YuSanka, Lukáš Matěna @lukasmatena, Vojtěch Bubník @bubnikv
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include <algorithm>
 #include <wx/dcbuffer.h>
 
 #include "RammingChart.hpp"
 #include "GUI.hpp"
+#include "GUI_App.hpp"
 #include "I18N.hpp"
 
 wxDEFINE_EVENT(EVT_WIPE_TOWER_CHART_CHANGED, wxCommandEvent);
@@ -15,8 +20,13 @@ void Chart::draw() {
     dc.SetPen(GetBackgroundColour());
     dc.DrawRectangle(GetClientRect());  // otherwise the background would end up black on windows
 
+#ifdef _WIN32
+    dc.SetPen(wxPen(GetForegroundColour()));
+    dc.SetBrush(wxBrush(Slic3r::GUI::wxGetApp().get_highlight_default_clr()));
+#else
     dc.SetPen(*wxBLACK_PEN);
     dc.SetBrush(*wxWHITE_BRUSH);
+#endif
     dc.DrawRectangle(m_rect);
     
     if (visible_area.m_width < 0.499) {
@@ -31,7 +41,11 @@ void Chart::draw() {
             dc.SetPen( wxPen( wxColor(std::min(255,color),255-std::max(color-255,0),0), 1 ) );
             dc.DrawLine(m_rect.GetLeft()+1+i,(m_line_to_draw)[i],m_rect.GetLeft()+1+i,m_rect.GetBottom());        
         }
+#ifdef _WIN32
+        dc.SetPen(wxPen(GetForegroundColour()));
+#else
         dc.SetPen( wxPen( wxColor(0,0,0), 1 ) );
+#endif
         for (unsigned int i=0;i<m_line_to_draw.size()-2;++i) {
             if (splines)
                 dc.DrawLine(m_rect.GetLeft()+i,(m_line_to_draw)[i],m_rect.GetLeft()+i+1,(m_line_to_draw)[i+1]);
@@ -44,7 +58,11 @@ void Chart::draw() {
     
     // draw draggable buttons
     dc.SetBrush(*wxBLUE_BRUSH);
-    dc.SetPen( wxPen( wxColor(0,0,0), 1 ) );
+#ifdef _WIN32
+        dc.SetPen(wxPen(GetForegroundColour()));
+#else
+        dc.SetPen( wxPen( wxColor(0,0,0), 1 ) );
+#endif
     for (auto& button : m_buttons)
         //dc.DrawRectangle(math_to_screen(button.get_pos())-wxPoint(side/2.,side/2.), wxSize(side,side));
         dc.DrawCircle(math_to_screen(button.get_pos()),side/2.);
@@ -97,6 +115,7 @@ void Chart::mouse_right_button_clicked(wxMouseEvent& event) {
 
 
 void Chart::mouse_clicked(wxMouseEvent& event) {
+    m_uniform = (event.GetModifiers() == wxMOD_CONTROL);
     wxPoint point = event.GetPosition();
     int button_index = which_button_is_clicked(point);
     if ( button_index != -1) {
@@ -118,7 +137,15 @@ void Chart::mouse_moved(wxMouseEvent& event) {
     }    
     int delta_x = pos.x - m_previous_mouse.x;
     int delta_y = pos.y - m_previous_mouse.y;
-    m_dragged->move(fixed_x?0:double(delta_x)/m_rect.GetWidth() * visible_area.m_width,-double(delta_y)/m_rect.GetHeight() * visible_area.m_height); 
+
+    double new_y = m_dragged->get_pos().m_y - double(delta_y) / m_rect.GetHeight() * visible_area.m_height;
+
+    if (m_uniform)
+        for (ButtonToDrag& b : m_buttons)
+            b.move(fixed_x?0:double(delta_x)/m_rect.GetWidth() * visible_area.m_width, new_y - b.get_pos().m_y); 
+    else
+        m_dragged->move(fixed_x?0:double(delta_x)/m_rect.GetWidth() * visible_area.m_width, new_y - m_dragged->get_pos().m_y); 
+
     m_previous_mouse = pos;
     recalculate_line();
 }
@@ -245,7 +272,7 @@ std::vector<float> Chart::get_ramming_speed(float sampling) const {
     std::vector<float> speeds_out;
     
     const int number_of_samples = std::round( visible_area.m_width / sampling);
-    if (number_of_samples>0) {
+    if (number_of_samples>0 && !m_line_to_draw.empty()) {
         const int dx = (m_line_to_draw.size()-1) / number_of_samples;
         for (int j=0;j<number_of_samples;++j) {
             float left =  screen_to_math(wxPoint(0,m_line_to_draw[j*dx])).m_y;

@@ -1,12 +1,22 @@
+///|/ Copyright (c) Prusa Research 2016 - 2023 Pavel Mikuš @Godrak, Oleksandra Iushchenko @YuSanka, Vojtěch Bubník @bubnikv, Lukáš Matěna @lukasmatena, Filip Sykala @Jony01, David Kocík @kocikdav, Roman Beránek @zavorka, Enrico Turri @enricoturri1966, Tomáš Mészáros @tamasmeszaros, Vojtěch Král @vojtechkral
+///|/ Copyright (c) 2021 Justin Schuh @jschuh
+///|/ Copyright (c) Slic3r 2013 - 2015 Alessandro Ranellucci @alranel
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "Utils.hpp"
 #include "I18N.hpp"
 
+#include <atomic>
 #include <locale>
 #include <ctime>
 #include <cstdarg>
 #include <stdio.h>
 
+#include "Platform.hpp"
 #include "Time.hpp"
+#include "format.hpp"
+#include "libslic3r.h"
 
 #ifdef WIN32
 	#include <windows.h>
@@ -19,9 +29,14 @@
 	#ifdef BSD
 		#include <sys/sysctl.h>
 	#endif
-    #ifdef __APPLE__
+	#ifdef __APPLE__
         #include <mach/mach.h>
     #endif
+    #ifdef __linux__
+       	#include <sys/stat.h>
+       	#include <fcntl.h>
+		#include <sys/sendfile.h>
+	#endif
 #endif
 
 #include <boost/log/core.hpp>
@@ -37,11 +52,27 @@
 #include <boost/nowide/convert.hpp>
 #include <boost/nowide/cstdio.hpp>
 
-#include <tbb/task_scheduler_init.h>
+// We are using quite an old TBB 2017 U7, which does not support global control API officially.
+// Before we update our build servers, let's use the old API, which is deprecated in up to date TBB.
+#include <tbb/tbb.h>
+#if ! defined(TBB_VERSION_MAJOR)
+    #include <tbb/version.h>
+#endif
+#if ! defined(TBB_VERSION_MAJOR)
+    static_assert(false, "TBB_VERSION_MAJOR not defined");
+#endif
+#if TBB_VERSION_MAJOR >= 2021
+    #define TBB_HAS_GLOBAL_CONTROL
+#endif
+#ifdef TBB_HAS_GLOBAL_CONTROL
+    #include <tbb/global_control.h>
+#else
+    #include <tbb/task_scheduler_init.h>
+#endif
 
-#if defined(__linux) || defined(__GNUC__ )
+#if defined(__linux__) || defined(__GNUC__ )
 #include <strings.h>
-#endif /* __linux */
+#endif /* __linux__ */
 
 #ifdef _MSC_VER 
     #define strcasecmp _stricmp
@@ -93,28 +124,24 @@ unsigned get_logging_level()
 }
 
 // Force set_logging_level(<=error) after loading of the DLL.
-// This is currently only needed if libslic3r is loaded as a shared library into Perl interpreter
-// to perform unit and integration tests.
+// This is used ot disable logging for unit and integration tests.
 static struct RunOnInit {
-    RunOnInit() { 
+    RunOnInit() {
         set_logging_level(1);
     }
 } g_RunOnInit;
 
-void trace(unsigned int level, const char *message)
+void enforce_thread_count(const std::size_t count)
 {
-    boost::log::trivial::severity_level severity = level_to_boost(level);
-
-    BOOST_LOG_STREAM_WITH_PARAMS(::boost::log::trivial::logger::get(),\
-        (::boost::log::keywords::severity = severity)) << message;
-}
-
-void disable_multi_threading()
-{
-    // Disable parallelization so the Shiny profiler works
-    static tbb::task_scheduler_init *tbb_init = nullptr;
-    if (tbb_init == nullptr)
-        tbb_init = new tbb::task_scheduler_init(1);
+    // Disable parallelization to simplify debugging.
+#ifdef TBB_HAS_GLOBAL_CONTROL
+	{
+		static tbb::global_control gc(tbb::global_control::max_allowed_parallelism, count);
+	}
+#else // TBB_HAS_GLOBAL_CONTROL
+    static tbb::task_scheduler_init *tbb_init = new tbb::task_scheduler_init(count);
+    UNUSED(tbb_init);
+#endif // TBB_HAS_GLOBAL_CONTROL
 }
 
 static std::string g_var_dir;
@@ -159,6 +186,30 @@ const std::string& localization_dir()
 	return g_local_dir;
 }
 
+static std::string g_sys_shapes_dir;
+
+void set_sys_shapes_dir(const std::string &dir)
+{
+    g_sys_shapes_dir = dir;
+}
+
+const std::string& sys_shapes_dir()
+{
+	return g_sys_shapes_dir;
+}
+
+static std::string g_custom_gcodes_dir;
+
+void set_custom_gcodes_dir(const std::string &dir)
+{
+    g_custom_gcodes_dir = dir;
+}
+
+const std::string& custom_gcodes_dir()
+{
+    return g_custom_gcodes_dir;
+}
+
 // Translate function callback, to call wxWidgets translate function to convert non-localized UTF8 string to a localized one.
 Slic3r::I18N::translate_fn_type Slic3r::I18N::translate_fn = nullptr;
 
@@ -172,6 +223,28 @@ void set_data_dir(const std::string &dir)
 const std::string& data_dir()
 {
     return g_data_dir;
+}
+
+std::string custom_shapes_dir()
+{
+    return (boost::filesystem::path(g_data_dir) / "shapes").string();
+}
+
+static std::atomic<bool> debug_out_path_called(false);
+
+std::string debug_out_path(const char *name, ...)
+{
+	static constexpr const char *SLIC3R_DEBUG_OUT_PATH_PREFIX = "out/";
+    if (! debug_out_path_called.exchange(true)) {
+		std::string path = boost::filesystem::system_complete(SLIC3R_DEBUG_OUT_PATH_PREFIX).string();
+        printf("Debugging output files will be written to %s\n", path.c_str());
+    }
+	char buffer[2048];
+	va_list args;
+	va_start(args, name);
+	std::vsprintf(buffer, name, args);
+	va_end(args);
+	return std::string(SLIC3R_DEBUG_OUT_PATH_PREFIX) + std::string(buffer);
 }
 
 #ifdef _WIN32
@@ -417,27 +490,285 @@ std::error_code rename_file(const std::string &from, const std::string &to)
 #endif
 }
 
-int copy_file(const std::string &from, const std::string &to)
+#ifdef __linux__
+// Copied from boost::filesystem. 
+// Called by copy_file_linux() in case linux sendfile() API is not supported.
+int copy_file_linux_read_write(int infile, int outfile, uintmax_t file_size)
 {
-    const boost::filesystem::path source(from);
-    const boost::filesystem::path target(to);
-    static const auto perms = boost::filesystem::owner_read | boost::filesystem::owner_write | boost::filesystem::group_read | boost::filesystem::others_read;   // aka 644
+    std::vector<char> buf(
+	    // Prefer the buffer to be larger than the file size so that we don't have
+	    // to perform an extra read if the file fits in the buffer exactly.
+    	std::clamp<size_t>(file_size + (file_size < ~static_cast<uintmax_t >(0u)),
+		// Min and max buffer sizes are selected to minimize the overhead from system calls.
+		// The values are picked based on coreutils cp(1) benchmarking data described here:
+		// https://github.com/coreutils/coreutils/blob/d1b0257077c0b0f0ee25087efd46270345d1dd1f/src/ioblksize.h#L23-L72
+    			   		   8u * 1024u, 256u * 1024u),
+    	0);
 
-    // Make sure the file has correct permission both before and after we copy over it.
-    // NOTE: error_code variants are used here to supress expception throwing.
-    // Error code of permission() calls is ignored on purpose - if they fail,
-    // the copy_file() function will fail appropriately and we don't want the permission()
-    // calls to cause needless failures on permissionless filesystems (ie. FATs on SD cards etc.)
-    // or when the target file doesn't exist.
-    boost::system::error_code ec;
-    boost::filesystem::permissions(target, perms, ec);
-    boost::filesystem::copy_file(source, target, boost::filesystem::copy_option::overwrite_if_exists, ec);
-    if (ec) {
-        return -1;
+#if defined(POSIX_FADV_SEQUENTIAL)
+    ::posix_fadvise(infile, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
+
+    // Don't use file size to limit the amount of data to copy since some filesystems, like procfs or sysfs,
+    // provide files with generated content and indicate that their size is zero or 4096. Just copy as much data
+    // as we can read from the input file.
+    while (true) {
+        ssize_t sz_read = ::read(infile, buf.data(), buf.size());
+        if (sz_read == 0)
+            break;
+        if (sz_read < 0) {
+            int err = errno;
+            if (err == EINTR)
+                continue;
+            return err;
+        }
+        // Allow for partial writes - see Advanced Unix Programming (2nd Ed.),
+        // Marc Rochkind, Addison-Wesley, 2004, page 94
+        for (ssize_t sz_wrote = 0; sz_wrote < sz_read;) {
+            ssize_t sz = ::write(outfile, buf.data() + sz_wrote, static_cast<std::size_t>(sz_read - sz_wrote));
+            if (sz < 0) {
+                int err = errno;
+                if (err == EINTR)
+                    continue;
+                return err;
+            }
+            sz_wrote += sz;
+        }
     }
-    boost::filesystem::permissions(target, perms, ec);
-
     return 0;
+}
+
+// Copied from boost::filesystem, to support copying a file to a weird filesystem, which does not support changing file attributes,
+// for example ChromeOS Linux integration or FlashAIR WebDAV.
+// Copied and simplified from boost::filesystem::detail::copy_file() with option = overwrite_if_exists and with just the Linux path kept,
+// and only features supported by Linux 3.10 (on our build server with CentOS 7) are kept, namely sendfile with ranges and statx() are not supported.
+bool copy_file_linux(const boost::filesystem::path &from, const boost::filesystem::path &to, boost::system::error_code &ec)
+{
+	using namespace boost::filesystem;
+
+	struct fd_wrapper
+	{
+		int fd { -1 };
+		fd_wrapper() = default;
+		explicit fd_wrapper(int fd) throw() : fd(fd) {}
+		~fd_wrapper() throw() { if (fd >= 0) ::close(fd); }
+	};
+
+	ec.clear();
+  	int err = 0;
+
+  	// Note: Declare fd_wrappers here so that errno is not clobbered by close() that may be called in fd_wrapper destructors
+  	fd_wrapper infile, outfile;
+
+  	while (true) {
+    	infile.fd = ::open(from.c_str(), O_RDONLY | O_CLOEXEC);
+    	if (infile.fd < 0) {
+      		err = errno;
+      		if (err == EINTR)
+        		continue;
+		fail:
+			ec.assign(err, boost::system::system_category());
+  			return false;
+    	}
+    	break;
+  	}
+
+	struct ::stat from_stat;
+	if (::fstat(infile.fd, &from_stat) != 0) {
+		fail_errno:
+		err = errno;
+		goto fail;
+	}
+
+  	const mode_t from_mode = from_stat.st_mode;
+  	if (!S_ISREG(from_mode)) {
+    	err = ENOSYS;
+    	goto fail;
+  	}
+
+  	// Enable writing for the newly created files. Having write permission set is important e.g. for NFS,
+  	// which checks the file permission on the server, even if the client's file descriptor supports writing.
+  	mode_t to_mode = from_mode | S_IWUSR;
+  	int oflag = O_WRONLY | O_CLOEXEC | O_CREAT | O_TRUNC;
+
+	while (true) {
+	  	outfile.fd = ::open(to.c_str(), oflag, to_mode);
+	  	if (outfile.fd < 0) {
+	    	err = errno;
+	    	if (err == EINTR)
+	      		continue;
+	    	goto fail;
+	  	}
+	  	break;
+	}
+
+	struct ::stat to_stat;
+	if (::fstat(outfile.fd, &to_stat) != 0)
+		goto fail_errno;
+
+	to_mode = to_stat.st_mode;
+	if (!S_ISREG(to_mode)) {
+		err = ENOSYS;
+		goto fail;
+	}
+
+	if (from_stat.st_dev == to_stat.st_dev && from_stat.st_ino == to_stat.st_ino) {
+		err = EEXIST;
+		goto fail;
+	}
+
+	//! copy_file implementation that uses sendfile loop. Requires sendfile to support file descriptors.
+	//FIXME Vojtech: This is a copy loop valid for Linux 2.6.33 and newer.
+	// copy_file_data_copy_file_range() supports cross-filesystem copying since 5.3, but Vojtech did not want to polute this
+	// function with that, we don't think the performance gain is worth it for the types of files we are copying,
+	// and our build server based on CentOS 7 with Linux 3.10 does not support that anyways.
+	{
+		// sendfile will not send more than this amount of data in one call
+		constexpr std::size_t max_send_size = 0x7ffff000u;
+		uintmax_t offset = 0u;
+		while (off_t(offset) < from_stat.st_size) {
+			uintmax_t size_left = from_stat.st_size - offset;
+			std::size_t size_to_copy = max_send_size;
+			if (size_left < static_cast<uintmax_t>(max_send_size))
+				size_to_copy = static_cast<std::size_t>(size_left);
+			ssize_t sz = ::sendfile(outfile.fd, infile.fd, nullptr, size_to_copy);
+			if (sz < 0) {
+				err = errno;
+	            if (offset == 0u) {
+	                // sendfile may fail with EINVAL if the underlying filesystem does not support it.
+	                // See https://patchwork.kernel.org/project/linux-nfs/patch/20190411183418.4510-1-olga.kornievskaia@gmail.com/
+	                // https://bugzilla.redhat.com/show_bug.cgi?id=1783554.
+	                // https://github.com/boostorg/filesystem/commit/4b9052f1e0b2acf625e8247582f44acdcc78a4ce
+	                if (err == EINVAL || err == EOPNOTSUPP) {
+						err = copy_file_linux_read_write(infile.fd, outfile.fd, from_stat.st_size);
+						if (err < 0)
+							goto fail;
+						// Succeeded.
+	                	break;
+	                }
+	            }
+				if (err == EINTR)
+					continue;
+				if (err == 0)
+					break;
+				goto fail; // err already contains the error code
+			}
+			offset += sz;
+		}
+	}
+
+	// If we created a new file with an explicitly added S_IWUSR permission,
+	// we may need to update its mode bits to match the source file.
+	if (to_mode != from_mode && ::fchmod(outfile.fd, from_mode) != 0) {
+		if (platform_flavor() == PlatformFlavor::LinuxOnChromium) {
+			// Ignore that. 9p filesystem does not allow fmod().
+			BOOST_LOG_TRIVIAL(info) << "copy_file_linux() failed to fchmod() the output file \"" << to.string() << "\" to " << from_mode << ": " << ec.message() << 
+				" This may be expected when writing to a 9p filesystem.";
+		} else {
+			// Generic linux. Write out an error to console. At least we may get some feedback.
+			BOOST_LOG_TRIVIAL(error) << "copy_file_linux() failed to fchmod() the output file \"" << to.string() << "\" to " << from_mode << ": " << ec.message();
+		}
+	}
+
+	// Note: Use fsync/fdatasync followed by close to avoid dealing with the possibility of close failing with EINTR.
+	// Even if close fails, including with EINTR, most operating systems (presumably, except HP-UX) will close the
+	// file descriptor upon its return. This means that if an error happens later, when the OS flushes data to the
+	// underlying media, this error will go unnoticed and we have no way to receive it from close. Calling fsync/fdatasync
+	// ensures that all data have been written, and even if close fails for some unfathomable reason, we don't really
+	// care at that point.
+	err = ::fdatasync(outfile.fd);
+	if (err != 0)
+		goto fail_errno;
+
+	return true;
+}
+#endif // __linux__
+
+CopyFileResult copy_file_inner(const std::string& from, const std::string& to, std::string& error_message)
+{
+	const boost::filesystem::path source(from);
+	const boost::filesystem::path target(to);
+	static const auto perms = boost::filesystem::owner_read | boost::filesystem::owner_write | boost::filesystem::group_read | boost::filesystem::others_read;   // aka 644
+
+	// Make sure the file has correct permission both before and after we copy over it.
+	// NOTE: error_code variants are used here to supress expception throwing.
+	// Error code of permission() calls is ignored on purpose - if they fail,
+	// the copy_file() function will fail appropriately and we don't want the permission()
+	// calls to cause needless failures on permissionless filesystems (ie. FATs on SD cards etc.)
+	// or when the target file doesn't exist.
+	boost::system::error_code ec;
+	boost::filesystem::permissions(target, perms, ec);
+	if (ec)
+		BOOST_LOG_TRIVIAL(debug) << "boost::filesystem::permisions before copy error message (this could be irrelevant message based on file system): " << ec.message();
+	ec.clear();
+#ifdef __linux__
+	// We want to allow copying files on Linux to succeed even if changing the file attributes fails.
+	// That may happen when copying on some exotic file system, for example Linux on Chrome.
+	copy_file_linux(source, target, ec);
+#else // __linux__
+	boost::filesystem::copy_file(source, target, boost::filesystem::copy_options::overwrite_existing, ec);
+#endif // __linux__
+	if (ec) {
+		error_message = ec.message();
+		return FAIL_COPY_FILE;
+	}
+	ec.clear();
+	boost::filesystem::permissions(target, perms, ec);
+	if (ec)
+		BOOST_LOG_TRIVIAL(debug) << "boost::filesystem::permisions after copy error message (this could be irrelevant message based on file system): " << ec.message();
+	return SUCCESS;
+}
+
+CopyFileResult copy_file(const std::string &from, const std::string &to, std::string& error_message, const bool with_check)
+{
+	std::string to_temp = to + ".tmp";
+	CopyFileResult ret_val = copy_file_inner(from, to_temp, error_message);
+    if(ret_val == SUCCESS)
+	{
+        if (with_check)
+            ret_val = check_copy(from, to_temp);
+
+        if (ret_val == 0 && rename_file(to_temp, to))
+        	ret_val = FAIL_RENAMING;
+	}
+	return ret_val;
+}
+
+CopyFileResult check_copy(const std::string &origin, const std::string &copy)
+{
+	boost::nowide::ifstream f1(origin, std::ifstream::in | std::ifstream::binary | std::ifstream::ate);
+	boost::nowide::ifstream f2(copy, std::ifstream::in | std::ifstream::binary | std::ifstream::ate);
+
+	if (f1.fail())
+		return FAIL_CHECK_ORIGIN_NOT_OPENED;
+	if (f2.fail())
+		return FAIL_CHECK_TARGET_NOT_OPENED;
+
+	std::streampos fsize = f1.tellg();
+	if (fsize != f2.tellg())
+		return FAIL_FILES_DIFFERENT;
+
+	f1.seekg(0, std::ifstream::beg);
+	f2.seekg(0, std::ifstream::beg);
+
+	// Compare by reading 8 MiB buffers one at a time.
+	size_t 			  buffer_size = 8 * 1024 * 1024;
+	std::vector<char> buffer_origin(buffer_size, 0);
+	std::vector<char> buffer_copy(buffer_size, 0);
+	do {
+		f1.read(buffer_origin.data(), buffer_size);
+        f2.read(buffer_copy.data(), buffer_size);
+		std::streampos origin_cnt = f1.gcount();
+		std::streampos copy_cnt   = f2.gcount();
+		if (origin_cnt != copy_cnt ||
+			(origin_cnt > 0 && std::memcmp(buffer_origin.data(), buffer_copy.data(), origin_cnt) != 0))
+			// Files are different.
+			return FAIL_FILES_DIFFERENT;
+		fsize -= origin_cnt;
+    } while (f1.good() && f2.good());
+
+    // All data has been read and compared equal.
+    return (f1.eof() && f2.eof() && fsize == 0) ? SUCCESS : FAIL_FILES_DIFFERENT;
 }
 
 // Ignore system and hidden files, which may be created by the DropBox synchronisation process.
@@ -464,6 +795,33 @@ bool is_idx_file(const boost::filesystem::directory_entry &dir_entry)
 	return is_plain_file(dir_entry) && strcasecmp(dir_entry.path().extension().string().c_str(), ".idx") == 0;
 }
 
+bool is_gcode_file(const std::string &path)
+{
+		return boost::iends_with(path, ".gcode") || boost::iends_with(path, ".gco") ||
+					 boost::iends_with(path, ".g") || boost::iends_with(path, ".ngc") ||
+					 boost::iends_with(path, ".bgcode") || boost::iends_with(path, ".bgc");
+}
+
+bool is_img_file(const std::string &path)
+{
+	return boost::iends_with(path, ".png") || boost::iends_with(path, ".svg");
+}
+
+bool is_gallery_file(const boost::filesystem::directory_entry& dir_entry, char const* type)
+{
+	return is_plain_file(dir_entry) && strcasecmp(dir_entry.path().extension().string().c_str(), type) == 0;
+}
+
+bool is_gallery_file(const std::string &path, char const* type)
+{
+	return boost::iends_with(path, type);
+}
+
+bool is_shapes_dir(const std::string& dir)
+{
+	return dir == sys_shapes_dir() || dir == custom_shapes_dir();
+}
+
 } // namespace Slic3r
 
 #ifdef WIN32
@@ -475,59 +833,75 @@ bool is_idx_file(const boost::filesystem::directory_entry &dir_entry)
 
 namespace Slic3r {
 
-// Encode an UTF-8 string to the local code page.
-std::string encode_path(const char *src)
-{    
-#ifdef WIN32
-    // Convert the source utf8 encoded string to a wide string.
-    std::wstring wstr_src = boost::nowide::widen(src);
-    if (wstr_src.length() == 0)
-        return std::string();
-    // Convert a wide string to a local code page.
-    int size_needed = ::WideCharToMultiByte(0, 0, wstr_src.data(), (int)wstr_src.size(), nullptr, 0, nullptr, nullptr);
-    std::string str_dst(size_needed, 0);
-    ::WideCharToMultiByte(0, 0, wstr_src.data(), (int)wstr_src.size(), const_cast<char*>(str_dst.data()), size_needed, nullptr, nullptr);
-    return str_dst;
-#else /* WIN32 */
-    return src;
-#endif /* WIN32 */
-}
-
-// Encode an 8-bit string from a local code page to UTF-8.
-std::string decode_path(const char *src)
-{  
-#ifdef WIN32
-    int len = int(strlen(src));
-    if (len == 0)
-        return std::string();
-    // Convert the string encoded using the local code page to a wide string.
-    int size_needed = ::MultiByteToWideChar(0, 0, src, len, nullptr, 0);
-    std::wstring wstr_dst(size_needed, 0);
-    ::MultiByteToWideChar(0, 0, src, len, const_cast<wchar_t*>(wstr_dst.data()), size_needed);
-    // Convert a wide string to utf8.
-    return boost::nowide::narrow(wstr_dst.c_str());
-#else /* WIN32 */
-    return src;
-#endif /* WIN32 */
-}
-
-std::string normalize_utf8_nfc(const char *src)
+size_t get_utf8_sequence_length(const std::string& text, size_t pos)
 {
-    static std::locale locale_utf8(boost::locale::generator().generate(""));
-    return boost::locale::normalize(src, boost::locale::norm_nfc, locale_utf8);
+	assert(pos < text.size());
+	return get_utf8_sequence_length(text.c_str() + pos, text.size() - pos);
 }
 
-namespace PerlUtils {
-    // Get a file name including the extension.
-    std::string path_to_filename(const char *src)       { return boost::filesystem::path(src).filename().string(); }
-    // Get a file name without the extension.
-    std::string path_to_stem(const char *src)           { return boost::filesystem::path(src).stem().string(); }
-    // Get just the extension.
-    std::string path_to_extension(const char *src)      { return boost::filesystem::path(src).extension().string(); }
-    // Get a directory without the trailing slash.
-    std::string path_to_parent_path(const char *src)    { return boost::filesystem::path(src).parent_path().string(); }
-};
-
+size_t get_utf8_sequence_length(const char *seq, size_t size)
+{
+	size_t length = 0;
+	unsigned char c = seq[0];
+	if (c < 0x80) { // 0x00-0x7F
+		// is ASCII letter
+		length++;
+	}
+	// Bytes 0x80 to 0xBD are trailer bytes in a multibyte sequence.
+	// pos is in the middle of a utf-8 sequence. Add the utf-8 trailer bytes.
+	else if (c < 0xC0) { // 0x80-0xBF
+		length++;
+		while (length < size) {
+			c = seq[length];
+			if (c < 0x80 || c >= 0xC0) {
+				break; // prevent overrun
+			}
+			length++; // add a utf-8 trailer byte
+		}
+	}
+	// Bytes 0xC0 to 0xFD are header bytes in a multibyte sequence.
+	// The number of one bits above the topmost zero bit indicates the number of bytes (including this one) in the whole sequence.
+	else if (c < 0xE0) { // 0xC0-0xDF
+	 // add a utf-8 sequence (2 bytes)
+		if (2 > size) {
+			return size; // prevent overrun
+		}
+		length += 2;
+	}
+	else if (c < 0xF0) { // 0xE0-0xEF
+	 // add a utf-8 sequence (3 bytes)
+		if (3 > size) {
+			return size; // prevent overrun
+		}
+		length += 3;
+	}
+	else if (c < 0xF8) { // 0xF0-0xF7
+	 // add a utf-8 sequence (4 bytes)
+		if (4 > size) {
+			return size; // prevent overrun
+		}
+		length += 4;
+	}
+	else if (c < 0xFC) { // 0xF8-0xFB
+	 // add a utf-8 sequence (5 bytes)
+		if (5 > size) {
+			return size; // prevent overrun
+		}
+		length += 5;
+	}
+	else if (c < 0xFE) { // 0xFC-0xFD
+	 // add a utf-8 sequence (6 bytes)
+		if (6 > size) {
+			return size; // prevent overrun
+		}
+		length += 6;
+	}
+	else { // 0xFE-0xFF
+	 // not a utf-8 sequence
+		length++;
+	}
+	return length;
+}
 
 std::string string_printf(const char *format, ...)
 {
@@ -535,20 +909,32 @@ std::string string_printf(const char *format, ...)
     va_start(args1, format);
     va_list args2;
     va_copy(args2, args1);
+    
+    static const size_t INITIAL_LEN = 200;
+    std::string buffer(INITIAL_LEN, '\0');
+    
+    int bufflen = ::vsnprintf(buffer.data(), INITIAL_LEN - 1, format, args1);
+    
+    if (bufflen >= int(INITIAL_LEN)) {
+        buffer.resize(size_t(bufflen) + 1);
+        ::vsnprintf(buffer.data(), buffer.size(), format, args2);
+    }
 
-    size_t needed_size = ::vsnprintf(nullptr, 0, format, args1) + 1;
     va_end(args1);
-
-    std::string res(needed_size, '\0');
-    ::vsnprintf(&res.front(), res.size(), format, args2);
     va_end(args2);
-
-    return res;
+    
+    buffer.resize(bufflen);
+    return buffer;
 }
 
 std::string header_slic3r_generated()
 {
-    return std::string("generated by " SLIC3R_APP_NAME " " SLIC3R_VERSION " on " ) + Utils::utc_timestamp();
+	return std::string("generated by PrusaSlicer " SLIC3R_VERSION " on " ) + Utils::utc_timestamp();
+}
+
+std::string header_gcodeviewer_generated()
+{
+	return std::string("generated by " GCODEVIEWER_APP_NAME " " SLIC3R_VERSION " on ") + Utils::utc_timestamp();
 }
 
 unsigned get_current_pid()
@@ -560,7 +946,8 @@ unsigned get_current_pid()
 #endif
 }
 
-std::string xml_escape(std::string text)
+//FIXME this has potentially O(n^2) time complexity!
+std::string xml_escape(std::string text, bool is_marked/* = false*/)
 {
     std::string::size_type pos = 0;
     for (;;)
@@ -575,8 +962,8 @@ std::string xml_escape(std::string text)
         case '\"': replacement = "&quot;"; break;
         case '\'': replacement = "&apos;"; break;
         case '&':  replacement = "&amp;";  break;
-        case '<':  replacement = "&lt;";   break;
-        case '>':  replacement = "&gt;";   break;
+        case '<':  replacement = is_marked ? "<" :"&lt;"; break;
+        case '>': replacement = is_marked ? ">" : "&gt;"; break;
         default: break;
         }
 
@@ -585,6 +972,89 @@ std::string xml_escape(std::string text)
     }
 
     return text;
+}
+
+// Definition of escape symbols https://www.w3.org/TR/REC-xml/#AVNormalize
+// During the read of xml attribute normalization of white spaces is applied
+// Soo for not lose white space character it is escaped before store
+std::string xml_escape_double_quotes_attribute_value(std::string text)
+{
+    std::string::size_type pos = 0;
+    for (;;) {
+        pos = text.find_first_of("\"&<\r\n\t", pos);
+        if (pos == std::string::npos) break;
+
+        std::string replacement;
+        switch (text[pos]) {
+        case '\"': replacement = "&quot;"; break;
+        case '&': replacement = "&amp;"; break;
+        case '<': replacement = "&lt;"; break;
+        case '\r': replacement = "&#xD;"; break;
+        case '\n': replacement = "&#xA;"; break;
+        case '\t': replacement = "&#x9;"; break;
+        default: break;
+        }
+
+        text.replace(pos, 1, replacement);
+        pos += replacement.size();
+    }
+
+    return text;
+}
+
+std::string short_time(const std::string &time, bool force_localization /*= false*/)
+{
+	// Parse the dhms time format.
+	int days = 0;
+	int hours = 0;
+	int minutes = 0;
+	int seconds = 0;
+	if (time.find('d') != std::string::npos)
+		::sscanf(time.c_str(), "%dd %dh %dm %ds", &days, &hours, &minutes, &seconds);
+	else if (time.find('h') != std::string::npos)
+		::sscanf(time.c_str(), "%dh %dm %ds", &hours, &minutes, &seconds);
+	else if (time.find('m') != std::string::npos)
+		::sscanf(time.c_str(), "%dm %ds", &minutes, &seconds);
+	else if (time.find('s') != std::string::npos)
+		::sscanf(time.c_str(), "%ds", &seconds);
+	// Round to full minutes.
+	if (days + hours + minutes > 0 && seconds >= 30) {
+		if (++minutes == 60) {
+			minutes = 0;
+			if (++hours == 24) {
+				hours = 0;
+				++days;
+			}
+		}
+	}
+
+	// Format the dhm time
+
+	if (force_localization) {
+		auto get_d = [days]() { return format(_u8L("%1%d"), days); };
+		auto get_h = [hours]() { return format(_u8L("%1%h"), hours); };
+		// TRN "m" means "minutes"
+		auto get_m = [minutes]() { return format(_u8L("%1%m"), minutes); };
+
+		if (days > 0)
+			return get_d() + get_h() + get_m();
+		if (hours > 0)
+			return get_h() + get_m();
+		if (minutes > 0)
+			return get_m();
+		return format(_u8L("%1%s"), seconds);
+	}
+
+	char buffer[64];
+	if (days > 0)
+		::sprintf(buffer, "%dd%dh%dm", days, hours, minutes);
+	else if (hours > 0)
+		::sprintf(buffer, "%dh%dm", hours, minutes);
+	else if (minutes > 0)
+		::sprintf(buffer, "%dm", minutes);
+	else
+		::sprintf(buffer, "%ds", seconds);
+    return buffer;
 }
 
 std::string format_memsize_MB(size_t n) 
@@ -613,6 +1083,42 @@ std::string format_memsize_MB(size_t n)
     return out + "MB";
 }
 
+std::string format_memsize(size_t bytes, unsigned int decimals)
+{
+		static constexpr const float kb = 1024.0f;
+		static constexpr const float mb = 1024.0f * kb;
+		static constexpr const float gb = 1024.0f * mb;
+		static constexpr const float tb = 1024.0f * gb;
+
+		const float f_bytes = static_cast<float>(bytes);
+		if (f_bytes < kb)
+				return std::to_string(bytes) + " bytes";
+		else if (f_bytes < mb) {
+				const float f_kb = f_bytes / kb;
+				char buf[64];
+				sprintf(buf, "%.*f", decimals, f_kb);
+				return std::to_string(bytes) + " bytes (" + std::string(buf) + "KB)";
+		}
+		else if (f_bytes < gb) {
+				const float f_mb = f_bytes / mb;
+				char buf[64];
+				sprintf(buf, "%.*f", decimals, f_mb);
+				return std::to_string(bytes) + " bytes (" + std::string(buf) + "MB)";
+		}
+		else if (f_bytes < tb) {
+				const float f_gb = f_bytes / gb;
+				char buf[64];
+				sprintf(buf, "%.*f", decimals, f_gb);
+				return std::to_string(bytes) + " bytes (" + std::string(buf) + "GB)";
+		}
+		else {
+				const float f_tb = f_bytes / tb;
+				char buf[64];
+				sprintf(buf, "%.*f", decimals, f_tb);
+				return std::to_string(bytes) + " bytes (" + std::string(buf) + "TB)";
+		}
+}
+
 // Returns platform-specific string to be used as log output or parsed in SysInfoDialog.
 // The latter parses the string with (semi)colons as separators, it should look about as
 // "desc1: value1; desc2: value2" or similar (spaces should not matter).
@@ -638,16 +1144,11 @@ std::string log_memory_info(bool ignore_loglevel)
         } PROCESS_MEMORY_COUNTERS_EX, *PPROCESS_MEMORY_COUNTERS_EX;
     #endif /* PROCESS_MEMORY_COUNTERS_EX */
 
-
-        HANDLE hProcess = ::OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, ::GetCurrentProcessId());
-        if (hProcess != nullptr) {
-            PROCESS_MEMORY_COUNTERS_EX pmc;
-            if (GetProcessMemoryInfo(hProcess, (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc)))
-                out = " WorkingSet: " + format_memsize_MB(pmc.WorkingSetSize) + "; PrivateBytes: " + format_memsize_MB(pmc.PrivateUsage) + "; Pagefile(peak): " + format_memsize_MB(pmc.PagefileUsage) + "(" + format_memsize_MB(pmc.PeakPagefileUsage) + ")";
-            else
-                out += " Used memory: N/A";
-            CloseHandle(hProcess);
-        }
+        PROCESS_MEMORY_COUNTERS_EX pmc;
+        if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc)))
+            out = " WorkingSet: " + format_memsize_MB(pmc.WorkingSetSize) + "; PrivateBytes: " + format_memsize_MB(pmc.PrivateUsage) + "; Pagefile(peak): " + format_memsize_MB(pmc.PagefileUsage) + "(" + format_memsize_MB(pmc.PeakPagefileUsage) + ")";
+        else
+            out += " Used memory: N/A";
 #elif defined(__linux__) or defined(__APPLE__)
         // Get current memory usage.
     #ifdef __APPLE__

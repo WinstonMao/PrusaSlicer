@@ -1,3 +1,8 @@
+///|/ Copyright (c) Prusa Research 2018 - 2020 Vojtěch Bubník @bubnikv, Lukáš Matěna @lukasmatena
+///|/ Copyright (c) SuperSlicer 2018 Remi Durand @supermerill
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_FillGyroid_hpp_
 #define slic3r_FillGyroid_hpp_
 
@@ -11,10 +16,11 @@ class FillGyroid : public Fill
 {
 public:
     FillGyroid() {}
-    virtual Fill* clone() const { return new FillGyroid(*this); }
+    Fill* clone() const override { return new FillGyroid(*this); }
 
     // require bridge flow since most of this pattern hangs in air
-    virtual bool use_bridge_flow() const { return false; }
+    bool use_bridge_flow() const override { return false; }
+    bool is_self_crossing() override { return false; }
 
     // Correction applied to regular infill angle to maximize printing
     // speed in default configuration (degrees)
@@ -28,12 +34,12 @@ public:
 
 
 protected:
-    virtual void _fill_surface_single(
+    void _fill_surface_single(
         const FillParams                &params, 
         unsigned int                     thickness_layers,
         const std::pair<float, Point>   &direction, 
-        ExPolygon                       &expolygon, 
-        Polylines                       &polylines_out);
+        ExPolygon                        expolygon,
+        Polylines                       &polylines_out) override;
 };
 
 } // namespace Slic3r

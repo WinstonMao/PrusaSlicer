@@ -1,3 +1,11 @@
+///|/ Copyright (c) Prusa Research 2018 - 2021 David Kocík @kocikdav, Oleksandra Iushchenko @YuSanka, Tomáš Mészáros @tamasmeszaros, Vojtěch Bubník @bubnikv
+///|/
+///|/ ported from lib/Slic3r/GUI/ProgressStatusBar.pm:
+///|/ Copyright (c) Prusa Research 2016 - 2018 Vojtěch Bubník @bubnikv, Tomáš Mészáros @tamasmeszaros
+///|/ Copyright (c) Slic3r 2014 Alessandro Ranellucci @alranel
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "ProgressStatusBar.hpp"
 
 #include <wx/timer.h>
@@ -15,8 +23,7 @@
 namespace Slic3r {
 
 ProgressStatusBar::ProgressStatusBar(wxWindow *parent, int id)
-    : self{new wxStatusBar(parent ? parent : GUI::wxGetApp().mainframe,
-                           id == -1 ? wxID_ANY : id)}
+    : self{new wxStatusBar(parent, id == -1 ? wxID_ANY : id)}
     , m_prog{new wxGauge(self,
                          wxGA_HORIZONTAL,
                          100,
@@ -29,10 +36,10 @@ ProgressStatusBar::ProgressStatusBar(wxWindow *parent, int id)
                                   wxDefaultSize)}
     , m_timer{new wxTimer(self)}
 {
+    update_dark_ui();
     m_prog->Hide();
     m_cancelbutton->Hide();
 
-	self->SetFont(GUI::wxGetApp().normal_font());
     self->SetFieldsCount(3);
     int w[] = {-1, 150, 155};
     self->SetStatusWidths(3, w);
@@ -68,6 +75,13 @@ ProgressStatusBar::ProgressStatusBar(wxWindow *parent, int id)
 
 ProgressStatusBar::~ProgressStatusBar() {
     if(m_timer && m_timer->IsRunning()) m_timer->Stop();
+}
+
+void ProgressStatusBar::update_dark_ui()
+{
+    GUI::wxGetApp().UpdateDarkUI(self);
+    GUI::wxGetApp().UpdateDarkUI(m_prog);
+    GUI::wxGetApp().UpdateDarkUI(m_cancelbutton);
 }
 
 int ProgressStatusBar::get_progress() const
@@ -149,8 +163,7 @@ void ProgressStatusBar::run(int rate)
 
 void ProgressStatusBar::embed(wxFrame *frame)
 {
-    wxFrame* mf = frame ? frame : GUI::wxGetApp().mainframe;
-    if(mf) mf->SetStatusBar(self);
+    if(frame) frame->SetStatusBar(self);
 }
 
 void ProgressStatusBar::set_status_text(const wxString& txt)
@@ -173,14 +186,10 @@ wxString ProgressStatusBar::get_status_text() const
     return self->GetStatusText();
 }
 
-void ProgressStatusBar::show_cancel_button()
+void ProgressStatusBar::set_font(const wxFont &font)
 {
-    if(m_cancelbutton) m_cancelbutton->Show();
-}
-
-void ProgressStatusBar::hide_cancel_button()
-{
-    if(m_cancelbutton) m_cancelbutton->Hide();
+    self->SetFont(font);
 }
 
 }
+

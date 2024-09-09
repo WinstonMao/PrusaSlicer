@@ -1,20 +1,35 @@
+///|/ Copyright (c) Prusa Research 2018 - 2023 Tomáš Mészáros @tamasmeszaros, Lukáš Matěna @lukasmatena, Oleksandra Iushchenko @YuSanka, Enrico Turri @enricoturri1966, Vojtěch Bubník @bubnikv, Lukáš Hejl @hejllukas, David Kocík @kocikdav, Vojtěch Král @vojtechkral
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "SysInfoDialog.hpp"
 #include "I18N.hpp"
 #include "3DScene.hpp"
 #include "GUI.hpp"
 #include "../Utils/UndoRedo.hpp"
+#include "Plater.hpp"
 
 #include <string>
+
+#include <boost/algorithm/string/replace.hpp>
+
+#include <Eigen/Core>
 
 #include <wx/clipbrd.h>
 #include <wx/platinfo.h>
 #include "GUI_App.hpp"
+#include "MainFrame.hpp"
 #include "wxExtensions.hpp"
+#include "../libslic3r/BlacklistedLibraryCheck.hpp"
+#include "../libslic3r/Color.hpp"
+#include "format.hpp"
 
 #ifdef _WIN32
 	// The standard Windows includes.
 	#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
 	#define NOMINMAX
+#endif
 	#include <Windows.h>
 	#include <psapi.h>
 #endif /* _WIN32 */
@@ -31,12 +46,17 @@ std::string get_main_info(bool format_as_html)
     std::string line_end = format_as_html ? "<br>" : "\n";
 
     if (!format_as_html)
-        out << b_start << SLIC3R_APP_NAME << b_end << line_end;
+        out << b_start << (wxGetApp().is_editor() ? SLIC3R_APP_NAME : GCODEVIEWER_APP_NAME) << b_end << line_end;
     out << b_start << "Version:   "             << b_end << SLIC3R_VERSION << line_end;
-    out << b_start << "Build:     "             << b_end << SLIC3R_BUILD_ID << line_end;
+    
+    std::string build_id = SLIC3R_BUILD_ID;
+    if (! wxGetApp().is_editor())
+        boost::replace_first(build_id, SLIC3R_APP_NAME, GCODEVIEWER_APP_NAME);
+    out << b_start << "Build:     " << b_end << build_id << line_end;
+
     out << line_end;
     out << b_start << "Operating System:    "   << b_end << wxPlatformInfo::Get().GetOperatingSystemFamilyName() << line_end;
-    out << b_start << "System Architecture: "   << b_end << wxPlatformInfo::Get().GetArchName() << line_end;
+    out << b_start << "System Architecture: "   << b_end << wxPlatformInfo::Get().GetBitnessName() << line_end;
     out << b_start << 
 #if defined _WIN32
         "Windows Version:     "
@@ -75,9 +95,9 @@ std::string get_mem_info(bool format_as_html)
 }
 
 SysInfoDialog::SysInfoDialog()
-    : DPIDialog(NULL, wxID_ANY, wxString(SLIC3R_APP_NAME) + " - " + _(L("System Information")), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE|wxRESIZE_BORDER)
+    : DPIDialog(static_cast<wxWindow*>(wxGetApp().mainframe), wxID_ANY, (wxGetApp().is_editor() ? wxString(SLIC3R_APP_NAME) : wxString(GCODEVIEWER_APP_NAME)) + " - " + _L("System Information"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
 {
-	wxColour bgr_clr = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
+	wxColour bgr_clr = wxGetApp().get_window_default_clr();//wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
 	SetBackgroundColour(bgr_clr);
     SetFont(wxGetApp().normal_font());
 
@@ -88,8 +108,10 @@ SysInfoDialog::SysInfoDialog()
 	main_sizer->Add(hsizer, 1, wxEXPAND | wxALL, 10);
 
     // logo
-    m_logo_bmp = ScalableBitmap(this, "PrusaSlicer_192px.png", 192);
-    m_logo = new wxStaticBitmap(this, wxID_ANY, m_logo_bmp.bmp());
+    //m_logo_bmp = ScalableBitmap(this, wxGetApp().logo_name(), 192);
+    //m_logo = new wxStaticBitmap(this, wxID_ANY, m_logo_bmp.bmp());
+    m_logo = new wxStaticBitmap(this, wxID_ANY, *get_bmp_bundle(wxGetApp().logo_name(), 192));
+
 	hsizer->Add(m_logo, 0, wxALIGN_CENTER_VERTICAL);
     
     wxBoxSizer* vsizer = new wxBoxSizer(wxVERTICAL);
@@ -97,19 +119,19 @@ SysInfoDialog::SysInfoDialog()
 
     // title
     {
-        wxStaticText* title = new wxStaticText(this, wxID_ANY, SLIC3R_APP_NAME, wxDefaultPosition, wxDefaultSize);
+        wxStaticText* title = new wxStaticText(this, wxID_ANY, wxGetApp().is_editor() ? SLIC3R_APP_NAME : GCODEVIEWER_APP_NAME, wxDefaultPosition, wxDefaultSize);
         wxFont title_font = wxGetApp().bold_font();
         title_font.SetFamily(wxFONTFAMILY_ROMAN);
-        title_font.SetPointSize(22);
+        title_font.SetPointSize(int(2.5 * title_font.GetPointSize()));//title_font.SetPointSize(22);
         title->SetFont(title_font);
         vsizer->Add(title, 0, wxEXPAND | wxALIGN_LEFT | wxTOP, wxGetApp().em_unit()/*50*/);
     }
 
     // main_info_text
-    wxFont font = wxGetApp().normal_font();
-    const auto text_clr = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
-    auto text_clr_str = wxString::Format(wxT("#%02X%02X%02X"), text_clr.Red(), text_clr.Green(), text_clr.Blue());
-    auto bgr_clr_str = wxString::Format(wxT("#%02X%02X%02X"), bgr_clr.Red(), bgr_clr.Green(), bgr_clr.Blue());
+    wxFont font = GetFont();// get_default_font(this);
+    const auto text_clr = wxGetApp().get_label_clr_default();
+    auto text_clr_str = encode_color(ColorRGB(text_clr.Red(), text_clr.Green(), text_clr.Blue()));
+    auto bgr_clr_str = encode_color(ColorRGB(bgr_clr.Red(), bgr_clr.Green(), bgr_clr.Blue()));
 
     const int fs = font.GetPointSize() - 1;
     int size[] = { static_cast<int>(fs*1.5), static_cast<int>(fs*1.4), static_cast<int>(fs*1.3), fs, fs, fs, fs };
@@ -137,28 +159,41 @@ SysInfoDialog::SysInfoDialog()
         m_opengl_info_html->SetMinSize(wxSize(-1, 16 * wxGetApp().em_unit()));
         m_opengl_info_html->SetFonts(font.GetFaceName(), font.GetFaceName(), size);
         m_opengl_info_html->SetBorders(10);
-        const auto text = wxString::Format(
+        wxString blacklisted_libraries_message;
+#ifdef WIN32
+        std::wstring blacklisted_libraries = BlacklistedLibraryCheck::get_instance().get_blacklisted_string().c_str();
+        if (! blacklisted_libraries.empty())
+            blacklisted_libraries_message = wxString("<br><b>") + _L("Blacklisted libraries loaded into PrusaSlicer process:") + "</b><br>" + blacklisted_libraries;
+#endif // WIN32
+       const auto text = GUI::format_wxstr(
             "<html>"
             "<body bgcolor= %s link= %s>"
             "<font color=%s>"
-            "%s"
+            "%s<br>%s<br>%s<br>%s"
             "</font>"
             "</body>"
             "</html>", bgr_clr_str, text_clr_str, text_clr_str,
-            get_mem_info(true) + "<br>" + _3DScene::get_gl_info(true, true));
+            blacklisted_libraries_message,
+            get_mem_info(true), wxGetApp().get_gl_info(false),
+            "<b>" + _L("Eigen vectorization supported:") + "</b> " + Eigen::SimdInstructionSetsInUse());
+
         m_opengl_info_html->SetPage(text);
         main_sizer->Add(m_opengl_info_html, 1, wxEXPAND | wxBOTTOM, 15);
     }
-    
-    wxStdDialogButtonSizer* buttons = this->CreateStdDialogButtonSizer(wxOK);
-    m_btn_copy_to_clipboard = new wxButton(this, wxID_ANY, _(L("Copy to Clipboard")), wxDefaultPosition, wxDefaultSize);
 
-    buttons->Insert(0, m_btn_copy_to_clipboard, 0, wxLEFT, 5);
+    wxStdDialogButtonSizer* buttons = this->CreateStdDialogButtonSizer(wxOK);
+    wxGetApp().SetWindowVariantForButton(buttons->GetAffirmativeButton());
+    m_btn_copy_to_clipboard = new wxButton(this, wxID_ANY, _L("Copy to Clipboard"), wxDefaultPosition, wxDefaultSize);
+    wxGetApp().SetWindowVariantForButton(m_btn_copy_to_clipboard);
+
+    buttons->Insert(0, m_btn_copy_to_clipboard, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 5);
     m_btn_copy_to_clipboard->Bind(wxEVT_BUTTON, &SysInfoDialog::onCopyToClipboard, this);
 
     this->SetEscapeId(wxID_OK);
     this->Bind(wxEVT_BUTTON, &SysInfoDialog::onCloseDialog, this, wxID_OK);
     main_sizer->Add(buttons, 0, wxEXPAND | wxRIGHT | wxBOTTOM, 3);
+
+    wxGetApp().UpdateDlgDarkUI(this, true);
     
 //     this->Bind(wxEVT_LEFT_DOWN, &SysInfoDialog::onCloseDialog, this);
 //     logo->Bind(wxEVT_LEFT_DOWN, &SysInfoDialog::onCloseDialog, this);
@@ -169,10 +204,10 @@ SysInfoDialog::SysInfoDialog()
 
 void SysInfoDialog::on_dpi_changed(const wxRect &suggested_rect)
 {
-    m_logo_bmp.msw_rescale();
-    m_logo->SetBitmap(m_logo_bmp.bmp());
+    //m_logo_bmp.msw_rescale();
+    //m_logo->SetBitmap(m_logo_bmp.bmp());
 
-    wxFont font = GetFont();
+    wxFont font = get_default_font(this);
     const int fs = font.GetPointSize() - 1;
     int font_size[] = { static_cast<int>(fs*1.5), static_cast<int>(fs*1.4), static_cast<int>(fs*1.3), fs, fs, fs, fs };
 
@@ -198,7 +233,7 @@ void SysInfoDialog::on_dpi_changed(const wxRect &suggested_rect)
 void SysInfoDialog::onCopyToClipboard(wxEvent &)
 {
     wxTheClipboard->Open();
-    const auto text = get_main_info(false)+"\n"+_3DScene::get_gl_info(false, true);
+    const auto text = get_main_info(false) + "\n" + wxGetApp().get_gl_info(true);
     wxTheClipboard->SetData(new wxTextDataObject(text));
     wxTheClipboard->Close();
 }

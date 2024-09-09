@@ -1,122 +1,97 @@
+# Building PrusaSlicer on Windows
 
-# This how-to is out of date
 
-We have switched to MS Visual Studio 2019.
+## 0. Prerequisities
 
-We don't use MSVS 2013 any more. At the moment we are in the process of creating new pre-built dependency bundles
-and updating this document. In the meantime, you will need to compile the dependencies yourself
-[the same way as before](#building-the-dependencies-package-yourself)
-except with CMake generators for MSVS 2019 instead of 2013.
+The following tools need to be installed on your computer:
+- Microsoft Visual Studio version 16 2019 or 17 2022
+- CMake
+- git
 
-Thank you for understanding.
 
----
 
-# Building PrusaSlicer on Microsoft Windows
 
-~~The currently supported way of building PrusaSlicer on Windows is with CMake and MS Visual Studio 2013.
-You can use the free [Visual Studio 2013 Community Edition](https://www.visualstudio.com/vs/older-downloads/).
-CMake installer can be downloaded from [the official website](https://cmake.org/download/).~~
+## 1. Download sources
 
-~~Building with newer versions of MSVS (2015, 2017) may work too as reported by some of our users.~~
+Clone the respository. Use a directory relatively close to the drive root, so the path is not too long. Avoid spaces and non-ASCII characters. To place it in `C:\src\PrusaSlicer`, run:
+```
+c:> mkdir src
+c:> cd src
+c:\src> git clone https://github.com/prusa3d/PrusaSlicer.git
+```
 
-_Note:_ Thanks to [**@supermerill**](https://github.com/supermerill) for testing and inspiration for this guide.
 
-### Dependencies
+## 2.A Manual Build Instructions
 
-On Windows PrusaSlicer is built against statically built libraries.
-~~We provide a prebuilt package of all the needed dependencies. This package only works on Visual Studio 2013, so~~ if you are using a newer version of Visual Studio, you need to compile the dependencies yourself as per [below](#building-the-dependencies-package-yourself).
-The package comes in a several variants:
+_As an alternative, you can go to 2.B to compile PrusaSlicer using one automatic script._
 
-  - ~~64 bit, Release mode only (41 MB, 578 MB unpacked)~~
-  - ~~64 bit, Release and Debug mode (88 MB, 1.3 GB unpacked)~~
-  - ~~32 bit, Release mode only (38 MB, 520 MB unpacked)~~
-  - ~~32 bit, Release and Debug mode (74 MB, 1.1 GB unpacked)~~
+### Compile the dependencies.
+Dependencies are updated seldomly, thus they are compiled out of the PrusaSlicer source tree.
+Open the MSVC x64 Native Tools Command Prompt and run the following:
+```
+cd c:\src\PrusaSlicer\deps
+mkdir build
+cd build
+cmake ..
+cmake --build .
+```
+Expect this to take some time. Note that both _Debug_ and _Release_ variants are built. You can force only the _Release_ build by passing `-DDEP_DEBUG=OFF` to the first CMake call.
 
-When unsure, use the _Release mode only_ variant, the _Release and Debug_ variant is only needed for debugging & development.
+### Generate Visual Studio project file for PrusaSlicer, referencing the precompiled dependencies.
+Open the MSVC x64 Native Tools Command Prompt and run the following:
+```
+cd c:\src\PrusaSlicer\
+mkdir build
+cd build
+cmake .. -DCMAKE_PREFIX_PATH="c:\src\PrusaSlicer\deps\build\destdir\usr\local"
+```
 
-If you're unsure where to unpack the package, unpack it into `C:\local\` (but it can really be anywhere).
+Note that `CMAKE_PREFIX_PATH` must be absolute path. A relative path will not work.
 
-Alternatively you can also compile the dependencies yourself, see below.
+### Compile PrusaSlicer. 
 
-### Building PrusaSlicer with Visual Studio
+Double-click c:\src\PrusaSlicer\build\PrusaSlicer.sln to open in Visual Studio and select `PrusaSlicer_app_gui` as your startup project (right-click->Set as Startup Project).
 
-First obtain the PrusaSlicer sources via either git or by extracting the source archive.
+Run Build->Rebuild Solution once to populate all required dependency modules. This is NOT done automatically when you Build/Run. If you run both Debug and Release variants, you will need to do this once for each.
 
-Then you will need to note down the so-called 'prefix path' to the dependencies, this is the location of the dependencies packages + `\usr\local` appended.
-For example on 64 bits this would be `C:\local\destdir-64\usr\local`. The prefix path will need to be passed to CMake.
+Debug->Start Debugging or press F5
 
-When ready, open the relevant Visual Studio command line and `cd` into the directory with PrusaSlicer sources.
-Use these commands to prepare Visual Studio solution file:
+PrusaSlicer should start. You're up and running!
 
-    mkdir build
-    cd build
-    cmake .. -G "Visual Studio 12 Win64" -DCMAKE_PREFIX_PATH="<insert prefix path here>"
 
-Note that if you're building a 32-bit variant, you will need to change the `"Visual Studio 12 Win64"` to just `"Visual Studio 12"`.
 
-Conversely, if you're using Visual Studio version other than 2013, the version number will need to be changed accordingly.
 
-If `cmake` has finished without errors, go to the build directory and open the `PrusaSlicer.sln` solution file in Visual Studio.
-Before building, make sure you're building the right project (use one of those starting with `PrusaSlicer_app_...`) and that you're building
-with the right configuration, i.e. _Release_ vs. _Debug_. When unsure, choose _Release_.
-Note that you won't be able to build a _Debug_ variant against a _Release_-only dependencies package.
+## 2.B Run the automatic build script
 
-#### Installing using the `INSTALL` project
+_This is an alternative to the manual build described above. It relies on `build_win.bat` script which is part of the repository and which will find the MSVC installation, set up the build environment and build the dependencies and PrusaSlicer itself. The script was provided by @jschuh and PrusaSlicer team does not maintain it._
 
-PrusaSlicer can be run from the Visual Studio or from Visual Studio's build directory (`src\Release` or `src\Debug`),
-but for longer-term usage you might want to install somewhere using the `INSTALL` project.
-By default, this installs into `C:\Program Files\PrusaSlicer`.
-To customize the install path, use the `-DCMAKE_INSTALL_PREFIX=<path of your choice>` when invoking `cmake`.
+Just run the following command to get everything going with the default configs:
 
-### Building from the command line
+```
+c:\src>cd c:\src\PrusaSlicer
+c:\src\PrusaSlicer>build_win.bat -d=..\PrusaSlicer-deps -r=console
+```
 
-There are several options for building from the command line:
+The build script will run for a while and automatically perform the following steps:
+1. Configure and build [deps](#compile-the-dependencies) as RelWithDebInfo with `c:\src\PrusaSlicer-deps` as the destination directory
+2. Configure and build all [application targets](#compile-prusaslicer) as RelWithDebInfo
+3. Launch the resulting `prusa-slicer-console.exe` binary
 
-- [msbuild](https://docs.microsoft.com/en-us/visualstudio/msbuild/msbuild-reference?view=vs-2017&viewFallbackFrom=vs-2013)
-- [Ninja](https://ninja-build.org/)
-- [nmake](https://docs.microsoft.com/en-us/cpp/build/nmake-reference?view=vs-2017)
+You can change the above command line options to do things like:
+* Change the destination for the dependencies by pointing `-d` to a different directory such as: `build_win.bat -d=s:\PrusaSlicerDeps`
+* Open the solution in Visual Studio after the build completes by changing the `-r` switch to `-r=ide`
+* Generate a release build without debug info by adding `-c=Release` or a full debug build with `-c=Debug`
+* Perform an incremental application build (the default) with: `build_win.bat -s=app-dirty`
+* Clean and rebuild the application: `build_win.bat -s=app`
+* Clean and rebuild the dependencies: `build_win.bat -s=deps`
+* Clean and rebuild everything (app and deps): `build_win.bat -s=all`
+* _The full list of build script options can be listed by running:_ `build_win.bat -?`
 
-To build with msbuild, use the same CMake command as in previous paragraph and then build using
+#### Troubleshooting
 
-    msbuild /m /P:Configuration=Release ALL_BUILD.vcxproj
+You're best off initiating builds from within Visual Studio for day-to-day development. However, the `build_win.bat` script can be very helpful if you run into build failures after updating your source tree. Here are some tips to keep in mind:
+* The last several lines of output from `build_win.bat` will usually have the most helpful error messages.
+* If CMake complains about missing binaries or paths (e.g. after updating Visual Studio), building with `build_win.bat` will force CMake to regenerate its cache on an error.
+* After a deps change, you may just need to rebuild everything with the `-s=all` switch.
+* Reading through the instructions in the next section may help diagnose more complex issues.
 
-To build with Ninja or nmake, replace the `-G` option in the CMake call with `-G Ninja` or `-G "NMake Makefiles"` , respectively.
-Then use either `ninja` or `nmake` to start the build.
-
-To install, use `msbuild /P:Configuration=Release INSTALL.vcxproj` , `ninja install` , or `nmake install` .
-
-### Building the dependencies package yourself
-
-The dependencies package is built using CMake scripts inside the `deps` subdirectory of PrusaSlicer sources.
-(This is intentionally not interconnected with the CMake scripts in the rest of the sources.)
-
-Open the preferred Visual Studio command line (64 or 32 bit variant) and `cd` into the directory with PrusaSlicer sources.
-Then `cd` into the `deps` directory and use these commands to build:
-
-    mkdir build
-    cd build
-    cmake .. -G "Visual Studio 12 Win64" -DDESTDIR="C:\local\destdir-custom"
-    msbuild /m ALL_BUILD.vcxproj
-
-You can also use the Visual Studio GUI or other generators as mentioned above.
-
-The `DESTDIR` option is the location where the bundle will be installed.
-This may be customized. If you leave it empty, the `DESTDIR` will be placed inside the same `build` directory.
-
-Warning: If the `build` directory is nested too deep inside other folders, various file paths during the build
-become too long and the build might fail due to file writing errors (\*). For this reason, it is recommended to
-place the `build` directory relatively close to the drive root.
-
-Note that the build variant that you may choose using Visual Studio (i.e. _Release_ or _Debug_ etc.) when building the dependency package is **not relevant**.
-The dependency build will by default build _both_ the _Release_ and _Debug_ variants regardless of what you choose in Visual Studio.
-You can disable building of the debug variant by passing the
-
-    -DDEP_DEBUG=OFF
-
-option to CMake, this will only produce a _Release_ build.
-
-Refer to the CMake scripts inside the `deps` directory to see which dependencies are built in what versions and how this is done.
-
-\*) Specifically, the problem arises when building boost. Boost build tool appends all build options into paths of
-intermediate files, which are not handled correctly by either `b2.exe` or possibly `ninja` (?).

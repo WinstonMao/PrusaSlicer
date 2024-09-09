@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2018 - 2022 Enrico Turri @enricoturri1966, Vojtěch Bubník @bubnikv, Lukáš Matěna @lukasmatena, Tomáš Mészáros @tamasmeszaros
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_Format_3mf_hpp_
 #define slic3r_Format_3mf_hpp_
 
@@ -19,24 +23,26 @@ namespace Slic3r {
     enum {
         support_points_format_version = 1
     };
+    
+    enum {
+        drain_holes_format_version = 1
+    };
 
     class Model;
+    struct ConfigSubstitutionContext;
     class DynamicPrintConfig;
-#if ENABLE_THUMBNAIL_GENERATOR
     struct ThumbnailData;
-#endif // ENABLE_THUMBNAIL_GENERATOR
+
+    // Returns true if the 3mf file with the given filename is a PrusaSlicer project file (i.e. if it contains a config).
+    extern bool is_project_3mf(const std::string& filename);
 
     // Load the content of a 3mf file into the given model and preset bundle.
-    extern bool load_3mf(const char* path, DynamicPrintConfig* config, Model* model, bool check_version);
+    extern bool load_3mf(const char* path, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, Model* model, bool check_version);
 
     // Save the given model and the config data contained in the given Print into a 3mf file.
     // The model could be modified during the export process if meshes are not repaired or have no shared vertices
-#if ENABLE_THUMBNAIL_GENERATOR
-    extern bool store_3mf(const char* path, Model* model, const DynamicPrintConfig* config, const ThumbnailData* thumbnail_data = nullptr);
-#else
-    extern bool store_3mf(const char* path, Model* model, const DynamicPrintConfig* config);
-#endif // ENABLE_THUMBNAIL_GENERATOR
+    extern bool store_3mf(const char* path, Model* model, const DynamicPrintConfig* config, bool fullpath_sources, const ThumbnailData* thumbnail_data = nullptr, bool zip64 = true);
 
-}; // namespace Slic3r
+} // namespace Slic3r
 
 #endif /* slic3r_Format_3mf_hpp_ */

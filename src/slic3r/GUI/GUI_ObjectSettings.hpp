@@ -1,3 +1,8 @@
+///|/ Copyright (c) Prusa Research 2018 - 2022 Enrico Turri @enricoturri1966, Oleksandra Iushchenko @YuSanka, Vojtěch Bubník @bubnikv, Lukáš Matěna @lukasmatena
+///|/ Copyright (c) 2019 Maeyanie @Maeyanie
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_GUI_ObjectSettings_hpp_
 #define slic3r_GUI_ObjectSettings_hpp_
 
@@ -10,6 +15,7 @@ class wxBoxSizer;
 
 namespace Slic3r {
 class DynamicPrintConfig;
+class ModelConfig;
 namespace GUI {
 class ConfigOptionsGroup;
 
@@ -29,6 +35,7 @@ public:
 
     virtual wxSizer*    get_sizer();
     ConfigOptionsGroup* get_og() { return m_og.get(); }
+    const ConfigOptionsGroup* get_og() const { return m_og.get(); }
     wxWindow*           parent() const {return m_parent; }
 };
 
@@ -52,10 +59,10 @@ public:
      * Example: if Infill is set to 100%, and Fill Pattern is missed in config_to,
      * we should add fill_pattern to avoid endless loop in update
      */
-    bool        add_missed_options(DynamicPrintConfig *config_to, const DynamicPrintConfig &config_from);
-    void        update_config_values(DynamicPrintConfig*config);
+    bool        add_missed_options(ModelConfig *config_to, const DynamicPrintConfig &config_from);
+    void        update_config_values(ModelConfig *config);
     void        UpdateAndShow(const bool show) override;
-    void        msw_rescale();
+    void        sys_color_changed();
 };
 
 }}

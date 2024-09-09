@@ -1,3 +1,8 @@
+///|/ Copyright (c) Prusa Research 2018 - 2023 Lukáš Matěna @lukasmatena, Tomáš Mészáros @tamasmeszaros, Filip Sykala @Jony01, Vojtěch Bubník @bubnikv, Enrico Turri @enricoturri1966, David Kocík @kocikdav, Oleksandra Iushchenko @YuSanka, Vojtěch Král @vojtechkral
+///|/ Copyright (c) 2019 John Drake @foxox
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_GUI_BackgroundSlicingProcess_hpp_
 #define slic3r_GUI_BackgroundSlicingProcess_hpp_
 
@@ -5,21 +10,21 @@
 #include <condition_variable>
 #include <mutex>
 
-#include <boost/filesystem.hpp>
+#include <boost/thread.hpp>
 
 #include <wx/event.h>
 
-#include "libslic3r/Print.hpp"
+#include "libslic3r/PrintBase.hpp"
+#include "libslic3r/GCode/ThumbnailData.hpp"
 #include "slic3r/Utils/PrintHost.hpp"
-#include "slic3r/Utils/Thread.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
+
+
+namespace boost { namespace filesystem { class path; } }
 
 namespace Slic3r {
 
 class DynamicPrintConfig;
-class GCodePreviewData;
-#if ENABLE_THUMBNAIL_GENERATOR
-struct ThumbnailData;
-#endif // ENABLE_THUMBNAIL_GENERATOR
 class Model;
 class SLAPrint;
 
@@ -31,6 +36,39 @@ public:
 	virtual wxEvent *Clone() const { return new SlicingStatusEvent(*this); }
 
 	PrintBase::SlicingStatus status;
+};
+
+class SlicingProcessCompletedEvent : public wxEvent
+{
+public:
+	enum StatusType {
+		Finished,
+		Cancelled,
+		Error
+	};
+
+	SlicingProcessCompletedEvent(wxEventType eventType, int winid, StatusType status, std::exception_ptr exception) :
+		wxEvent(winid, eventType), m_status(status), m_exception(exception) {}
+	virtual wxEvent* Clone() const { return new SlicingProcessCompletedEvent(*this); }
+
+	StatusType 	status()    const { return m_status; }
+	bool 		finished()  const { return m_status == Finished; }
+	bool 		success()   const { return m_status == Finished; }
+	bool 		cancelled() const { return m_status == Cancelled; }
+	bool		error() 	const { return m_status == Error; }
+	// Unhandled error produced by stdlib or a Win32 structured exception, or unhandled Slic3r's own critical exception.
+	bool 		critical_error() const;
+	// Critical errors does invalidate plater except CopyFileError.
+	bool        invalidate_plater() const;
+	// Only valid if error()
+	void 		rethrow_exception() const { assert(this->error()); assert(m_exception); std::rethrow_exception(m_exception); }
+	// Produce a human readable message to be displayed by a notification or a message box.
+	// 2nd parameter defines whether the output should be displayed with a monospace font.
+	std::pair<std::string, bool> format_error_message() const;
+
+private:
+	StatusType 			m_status;
+	std::exception_ptr 	m_exception;
 };
 
 wxDEFINE_EVENT(EVT_SLICING_UPDATE, SlicingStatusEvent);
@@ -50,19 +88,21 @@ public:
 	~BackgroundSlicingProcess();
 
 	void set_fff_print(Print *print) { m_fff_print = print; }
-	void set_sla_print(SLAPrint *print) { m_sla_print = print; }
-	void set_gcode_preview_data(GCodePreviewData *gpd) { m_gcode_preview_data = gpd; }
-#if ENABLE_THUMBNAIL_GENERATOR
-    void set_thumbnail_data(const std::vector<ThumbnailData>* data) { m_thumbnail_data = data; }
-#endif // ENABLE_THUMBNAIL_GENERATOR
+    void set_sla_print(SLAPrint *print) { m_sla_print = print; }
+	void set_thumbnail_cb(ThumbnailsGeneratorCallback cb) { m_thumbnail_cb = cb; }
+	void set_gcode_result(GCodeProcessorResult* result) { m_gcode_result = result; }
 
-	// The following wxCommandEvent will be sent to the UI thread / Platter window, when the slicing is finished
+	// The following wxCommandEvent will be sent to the UI thread / Plater window, when the slicing is finished
 	// and the background processing will transition into G-code export.
 	// The wxCommandEvent is sent to the UI thread asynchronously without waiting for the event to be processed.
 	void set_slicing_completed_event(int event_id) { m_event_slicing_completed_id = event_id; }
-	// The following wxCommandEvent will be sent to the UI thread / Platter window, when the G-code export is finished.
+	// The following wxCommandEvent will be sent to the UI thread / Plater window, when the G-code export is finished.
 	// The wxCommandEvent is sent to the UI thread asynchronously without waiting for the event to be processed.
 	void set_finished_event(int event_id) { m_event_finished_id = event_id; }
+	// The following wxCommandEvent will be sent to the UI thread / Plater window, when the G-code is being exported to
+	// specified path or uploaded.
+	// The wxCommandEvent is sent to the UI thread asynchronously without waiting for the event to be processed.
+	void set_export_began_event(int event_id) { m_event_export_began_id = event_id; }
 
 	// Activate either m_fff_print or m_sla_print.
 	// Return true if changed.
@@ -89,7 +129,7 @@ public:
 
 	// Apply config over the print. Returns false, if the new config values caused any of the already
 	// processed steps to be invalidated, therefore the task will need to be restarted.
-	Print::ApplyStatus apply(const Model &model, const DynamicPrintConfig &config);
+    PrintBase::ApplyStatus apply(const Model &model, const DynamicPrintConfig &config);
 	// After calling the apply() function, set_task() may be called to limit the task to be processed by process().
 	// This is useful for calculating SLA supports for a single object only.
 	void 		set_task(const PrintBase::TaskParams &params);
@@ -97,11 +137,11 @@ public:
 	bool 		empty() const;
 	// Validate the print. Returns an empty string if valid, returns an error message if invalid.
 	// Call validate before calling start().
-	std::string validate();
+    std::string validate(std::vector<std::string>* warnings = nullptr);
 
 	// Set the export path of the G-code.
 	// Once the path is set, the G-code 
-	void schedule_export(const std::string &path);
+	void schedule_export(const std::string &path, bool export_path_on_removable_media);
 	// Set print host upload job data to be enqueued to the PrintHostJobQueue
 	// after current print slicing is complete
 	void schedule_upload(Slic3r::PrintHostJob upload_job);
@@ -138,7 +178,16 @@ public:
     
 private:
 	void 	thread_proc();
-	void 	thread_proc_safe();
+	// Calls thread_proc(), catches all C++ exceptions and shows them using wxApp::OnUnhandledException().
+	void 	thread_proc_safe() throw();
+#ifdef _WIN32
+	// Wrapper for Win32 structured exceptions. Win32 structured exception blocks and C++ exception blocks cannot be mixed in the same function.
+	// Catch a SEH exception and return its ID or zero if no SEH exception has been catched.
+	unsigned long 	thread_proc_safe_seh() throw();
+	// Calls thread_proc_safe_seh(), rethrows a Slic3r::HardCrash exception based on SEH exception
+	// returned by thread_proc_safe_seh() and lets wxApp::OnUnhandledException() display it.
+	void 			thread_proc_safe_seh_throw() throw();
+#endif // _WIN32
 	void 	join_background_thread();
 	// To be called by Print::apply() through the Print::m_cancel_callback to stop the background
 	// processing before changing any data of running or finalized milestones.
@@ -151,22 +200,36 @@ private:
     // Temporary: for mimicking the fff file export behavior with the raster output
     void	process_sla();
 
+    // Call Print::process() and catch all exceptions into ex, thus no exception could be thrown
+    // by this method. This exception behavior is required to combine C++ exceptions with Win32 SEH exceptions
+    // on the same thread.
+	void    call_process(std::exception_ptr &ex) throw();
+
+#ifdef _WIN32
+	// Wrapper for Win32 structured exceptions. Win32 structured exception blocks and C++ exception blocks cannot be mixed in the same function.
+	// Catch a SEH exception and return its ID or zero if no SEH exception has been catched.
+	unsigned long call_process_seh(std::exception_ptr &ex) throw();
+	// Calls call_process_seh(), rethrows a Slic3r::HardCrash exception based on SEH exception
+	// returned by call_process_seh().
+	void    	  call_process_seh_throw(std::exception_ptr &ex) throw();
+#endif // _WIN32
+
 	// Currently active print. It is one of m_fff_print and m_sla_print.
 	PrintBase				   *m_print 			 = nullptr;
 	// Non-owned pointers to Print instances.
 	Print 					   *m_fff_print 		 = nullptr;
 	SLAPrint 				   *m_sla_print			 = nullptr;
 	// Data structure, to which the G-code export writes its annotations.
-	GCodePreviewData 		   *m_gcode_preview_data = nullptr;
-#if ENABLE_THUMBNAIL_GENERATOR
-    // Data structures, used to write thumbnails into gcode.
-    const std::vector<ThumbnailData>* m_thumbnail_data = nullptr;
-#endif // ENABLE_THUMBNAIL_GENERATOR
-	// Temporary G-code, there is one defined for the BackgroundSlicingProcess, differentiated from the other processes by a process ID.
+	GCodeProcessorResult     *m_gcode_result 		 = nullptr;
+	// Callback function, used to write thumbnails into gcode.
+    ThumbnailsGeneratorCallback m_thumbnail_cb 	     = nullptr;
+    // Temporary G-code, there is one defined for the BackgroundSlicingProcess,
+    // differentiated from the other processes by a process ID.
 	std::string 				m_temp_output_path;
 	// Output path provided by the user. The output path may be set even if the slicing is running,
 	// but once set, it cannot be re-set.
 	std::string 				m_export_path;
+	bool 						m_export_path_on_removable_media = false;
 	// Print host upload job to schedule after slicing is complete, used by schedule_upload(),
 	// empty by default (ie. no upload to schedule)
 	PrintHostJob                m_upload_job;
@@ -178,8 +241,24 @@ private:
 	std::condition_variable		m_condition;
 	State 						m_state = STATE_INITIAL;
 
+	// For executing tasks from the background thread on UI thread synchronously (waiting for result) using wxWidgets CallAfter().
+	// When the background proces is canceled, the UITask has to be invalidated as well, so that it will not be
+	// executed on the UI thread referencing invalid data.
+    struct UITask {
+        enum State {
+            Planned,
+            Finished,
+            Canceled,
+        };
+        State  					state = Planned;
+        std::mutex 				mutex;
+    	std::condition_variable	condition;
+    };
+    // Only one UI task may be planned by the background thread to be executed on the UI thread, as the background
+    // thread is blocking until the UI thread calculation finishes.
+    std::shared_ptr<UITask> 	m_ui_task;
+
     PrintState<BackgroundSlicingProcessStep, bspsCount>   	m_step_state;
-    mutable tbb::mutex                      				m_step_state_mutex;
 	bool                set_step_started(BackgroundSlicingProcessStep step);
 	void                set_step_done(BackgroundSlicingProcessStep step);
 	bool 				is_step_done(BackgroundSlicingProcessStep step) const;
@@ -187,12 +266,22 @@ private:
     bool                invalidate_all_steps();
     // If the background processing stop was requested, throw CanceledException.
     void                throw_if_canceled() const { if (m_print->canceled()) throw CanceledException(); }
+	void				finalize_gcode();
     void                prepare_upload();
+    // To be executed at the background thread.
+	ThumbnailsList		render_thumbnails(const ThumbnailsParams &params);
+	// Execute task from background thread on the UI thread synchronously. Returns true if processed, false if cancelled before executing the task.
+	bool 				execute_ui_task(std::function<void()> task);
+	// To be called from inside m_mutex to cancel a planned UI task.
+	static void			cancel_ui_task(std::shared_ptr<BackgroundSlicingProcess::UITask> task);
 
-	// wxWidgets command ID to be sent to the platter to inform that the slicing is finished, and the G-code export will continue.
+	// wxWidgets command ID to be sent to the plater to inform that the slicing is finished, and the G-code export will continue.
 	int 						m_event_slicing_completed_id 	= 0;
-	// wxWidgets command ID to be sent to the platter to inform that the task finished.
+	// wxWidgets command ID to be sent to the plater to inform that the task finished.
 	int 						m_event_finished_id  			= 0;
+	// wxWidgets command ID to be sent to the plater to inform that the G-code is being exported.
+	int                         m_event_export_began_id         = 0;
+
 };
 
 }; // namespace Slic3r

@@ -79,8 +79,7 @@ struct stl_neighbors {
   		which_vertex_not[1] = -1;
   		which_vertex_not[2] = -1;
   	}
-  	int num_neighbors_missing() const { return (this->neighbor[0] == -1) + (this->neighbor[1] == -1) + (this->neighbor[2] == -1); }
-  	int num_neighbors() const { return 3 - this->num_neighbors_missing(); }
+  	int num_neighbors() const { return 3 - ((this->neighbor[0] == -1) + (this->neighbor[1] == -1) + (this->neighbor[2] == -1)); }
 
   	// Index of a neighbor facet.
   	int   neighbor[3];
@@ -92,28 +91,44 @@ struct stl_stats {
     stl_stats() { memset(&header, 0, 81); }
     char          header[81];
     stl_type      type                      = (stl_type)0;
+    // Should always match the number of facets stored inside stl_file::facet_start.
     uint32_t      number_of_facets          = 0;
+    // Bounding box.
     stl_vertex    max                       = stl_vertex::Zero();
     stl_vertex    min                       = stl_vertex::Zero();
     stl_vertex    size                      = stl_vertex::Zero();
     float         bounding_diameter         = 0.f;
     float         shortest_edge             = 0.f;
+    // After repair, the volume shall always be positive.
     float         volume                    = -1.f;
+    // Number of face edges connected to another face.
+    // Don't use this statistics after repair, use the connected_facets_1/2/3_edge instead!
     int           connected_edges           = 0;
+    // Faces with >=1, >=2 and 3 edges connected to another face.
     int           connected_facets_1_edge   = 0;
     int           connected_facets_2_edge   = 0;
     int           connected_facets_3_edge   = 0;
+    // Faces with 1, 2 and 3 open edges after exact chaining, but before repair.
     int           facets_w_1_bad_edge       = 0;
     int           facets_w_2_bad_edge       = 0;
     int           facets_w_3_bad_edge       = 0;
+    // Number of faces read form an STL file.
     int           original_num_facets       = 0;
+    // Number of edges connected one to another by snapping their end vertices.
     int           edges_fixed               = 0;
+    // Number of faces removed because they were degenerated.
     int           degenerate_facets         = 0;
+    // Total number of facets removed: Degenerate faces and unconnected faces.
     int           facets_removed            = 0;
+    // Number of faces added by hole filling.
     int           facets_added              = 0;
+    // Number of faces reversed because of negative volume or because one patch was connected to another patch with incompatible normals.
     int           facets_reversed           = 0;
+    // Number of incompatible edges remaining after the patches were connected together and possibly their normals flipped.
     int           backwards_edges           = 0;
+    // Number of triangles, which were flipped during the fixing process.
     int           normals_fixed             = 0;
+    // Number of connected triangle patches.
     int           number_of_parts           = 0;
 
     void clear() { *this = stl_stats(); }
@@ -140,8 +155,6 @@ struct stl_file {
 
 struct indexed_triangle_set
 {
-	indexed_triangle_set() {}
-
 	void clear() { indices.clear(); vertices.clear(); }
 
 	size_t memsize() const {
@@ -149,9 +162,10 @@ struct indexed_triangle_set
 	}
 
 	std::vector<stl_triangle_vertex_indices> 	indices;
-	std::vector<stl_vertex>       				vertices;
-	//FIXME add normals once we get rid of the stl_file from TriangleMesh completely.
-	//std::vector<stl_normal> 					normals
+    std::vector<stl_vertex>       				vertices;
+
+    bool empty() const { return indices.empty() || vertices.empty(); }
+    bool operator==(const indexed_triangle_set& other) const { return this->indices == other.indices && this->vertices == other.vertices; }
 };
 
 extern bool stl_open(stl_file *stl, const char *file);
@@ -184,10 +198,21 @@ extern void stl_mirror_xz(stl_file *stl);
 
 extern void stl_get_size(stl_file *stl);
 
+// the following function is not used
+/*
 template<typename T>
 extern void stl_transform(stl_file *stl, T *trafo3x4)
 {
-	for (uint32_t i_face = 0; i_face < stl->stats.number_of_facets; ++ i_face) {
+    Eigen::Matrix<T, 3, 3, Eigen::DontAlign> trafo3x3;
+    for (int i = 0; i < 3; ++i)
+    {
+        for (int j = 0; j < 3; ++j)
+        {
+            trafo3x3(i, j) = (i * 4) + j;
+        }
+    }
+    Eigen::Matrix<T, 3, 3, Eigen::DontAlign> r = trafo3x3.inverse().transpose();
+    for (uint32_t i_face = 0; i_face < stl->stats.number_of_facets; ++ i_face) {
 		stl_facet &face = stl->facet_start[i_face];
 		for (int i_vertex = 0; i_vertex < 3; ++ i_vertex) {
 			stl_vertex &v_dst = face.vertex[i_vertex];
@@ -196,21 +221,18 @@ extern void stl_transform(stl_file *stl, T *trafo3x4)
 			v_dst(1) = T(trafo3x4[4] * v_src(0) + trafo3x4[5] * v_src(1) + trafo3x4[6]  * v_src(2) + trafo3x4[7]);
 			v_dst(2) = T(trafo3x4[8] * v_src(0) + trafo3x4[9] * v_src(1) + trafo3x4[10] * v_src(2) + trafo3x4[11]);
 		}
-		stl_vertex &v_dst = face.normal;
-		stl_vertex  v_src = v_dst;
-		v_dst(0) = T(trafo3x4[0] * v_src(0) + trafo3x4[1] * v_src(1) + trafo3x4[2]  * v_src(2));
-		v_dst(1) = T(trafo3x4[4] * v_src(0) + trafo3x4[5] * v_src(1) + trafo3x4[6]  * v_src(2));
-		v_dst(2) = T(trafo3x4[8] * v_src(0) + trafo3x4[9] * v_src(1) + trafo3x4[10] * v_src(2));
-	}
+        face.normal = (r * face.normal.template cast<T>()).template cast<float>().eval();
+    }
 
 	stl_get_size(stl);
 }
+*/
 
 template<typename T>
 inline void stl_transform(stl_file *stl, const Eigen::Transform<T, 3, Eigen::Affine, Eigen::DontAlign>& t)
 {
-	const Eigen::Matrix<double, 3, 3, Eigen::DontAlign> r = t.matrix().template block<3, 3>(0, 0);
-	for (size_t i = 0; i < stl->stats.number_of_facets; ++ i) {
+    const Eigen::Matrix<T, 3, 3, Eigen::DontAlign> r = t.matrix().template block<3, 3>(0, 0).inverse().transpose();
+    for (size_t i = 0; i < stl->stats.number_of_facets; ++ i) {
 		stl_facet &f = stl->facet_start[i];
 		for (size_t j = 0; j < 3; ++j)
 			f.vertex[j] = (t * f.vertex[j].template cast<T>()).template cast<float>().eval();
@@ -223,19 +245,26 @@ inline void stl_transform(stl_file *stl, const Eigen::Transform<T, 3, Eigen::Aff
 template<typename T>
 inline void stl_transform(stl_file *stl, const Eigen::Matrix<T, 3, 3, Eigen::DontAlign>& m)
 {
-	for (size_t i = 0; i < stl->stats.number_of_facets; ++ i) {
+    const Eigen::Matrix<T, 3, 3, Eigen::DontAlign> r = m.inverse().transpose();
+    for (size_t i = 0; i < stl->stats.number_of_facets; ++ i) {
 		stl_facet &f = stl->facet_start[i];
 		for (size_t j = 0; j < 3; ++j)
 			f.vertex[j] = (m * f.vertex[j].template cast<T>()).template cast<float>().eval();
-		f.normal = (m * f.normal.template cast<T>()).template cast<float>().eval();
-	}
+        f.normal = (r * f.normal.template cast<T>()).template cast<float>().eval();
+    }
 
 	stl_get_size(stl);
 }
 
+template<typename V>
+inline void its_translate(indexed_triangle_set &its, const V v)
+{
+  for (stl_vertex &v_dst : its.vertices)
+    v_dst += v;
+}
 
 template<typename T>
-extern void its_transform(indexed_triangle_set &its, T *trafo3x4)
+inline void its_transform(indexed_triangle_set &its, T *trafo3x4)
 {
 	for (stl_vertex &v_dst : its.vertices) {
 		stl_vertex  v_src = v_dst;
@@ -246,18 +275,24 @@ extern void its_transform(indexed_triangle_set &its, T *trafo3x4)
 }
 
 template<typename T>
-inline void its_transform(indexed_triangle_set &its, const Eigen::Transform<T, 3, Eigen::Affine, Eigen::DontAlign>& t)
+inline void its_transform(indexed_triangle_set &its, const Eigen::Transform<T, 3, Eigen::Affine, Eigen::DontAlign>& t, bool fix_left_handed = false)
 {
 	//const Eigen::Matrix<double, 3, 3, Eigen::DontAlign> r = t.matrix().template block<3, 3>(0, 0);
 	for (stl_vertex &v : its.vertices)
 		v = (t * v.template cast<T>()).template cast<float>().eval();
+  if (fix_left_handed && t.matrix().block(0, 0, 3, 3).determinant() < 0.)
+    for (stl_triangle_vertex_indices &i : its.indices)
+      std::swap(i[0], i[1]);
 }
 
 template<typename T>
-inline void its_transform(indexed_triangle_set &its, const Eigen::Matrix<T, 3, 3, Eigen::DontAlign>& m)
+inline void its_transform(indexed_triangle_set &its, const Eigen::Matrix<T, 3, 3, Eigen::DontAlign>& m, bool fix_left_handed = false)
 {
-	for (stl_vertex &v : its.vertices)
+  for (stl_vertex &v : its.vertices)
 		v = (m * v.template cast<T>()).template cast<float>().eval();
+  if (fix_left_handed && m.determinant() < 0.)
+    for (stl_triangle_vertex_indices &i : its.indices)
+      std::swap(i[0], i[1]);
 }
 
 extern void its_rotate_x(indexed_triangle_set &its, float angle);
@@ -268,6 +303,17 @@ extern void stl_generate_shared_vertices(stl_file *stl, indexed_triangle_set &it
 extern bool its_write_obj(const indexed_triangle_set &its, const char *file);
 extern bool its_write_off(const indexed_triangle_set &its, const char *file);
 extern bool its_write_vrml(const indexed_triangle_set &its, const char *file);
+
+
+typedef Eigen::Matrix<float, 3, 1, Eigen::DontAlign> obj_color; // Vec3f
+/// <summary>
+/// write idexed triangle set into obj file with color
+/// </summary>
+/// <param name="its">input model</param>
+/// <param name="color">color of stored model</param>
+/// <param name="file">define place to store</param>
+/// <returns>True on success otherwise FALSE</returns>
+extern bool its_write_obj(const indexed_triangle_set& its, const std::vector<obj_color> &color, const char* file);
 
 extern bool stl_write_dxf(stl_file *stl, const char *file, char *label);
 inline void stl_calculate_normal(stl_normal &normal, stl_facet *facet) {

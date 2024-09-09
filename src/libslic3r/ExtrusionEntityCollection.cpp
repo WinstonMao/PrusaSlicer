@@ -1,3 +1,11 @@
+///|/ Copyright (c) Prusa Research 2016 - 2023 Vojtěch Bubník @bubnikv, Lukáš Hejl @hejllukas, Lukáš Matěna @lukasmatena
+///|/ Copyright (c) SuperSlicer 2023 Remi Durand @supermerill
+///|/ Copyright (c) Slic3r 2013 - 2016 Alessandro Ranellucci @alranel
+///|/ Copyright (c) 2015 Maksim Derbasov @ntfshard
+///|/ Copyright (c) 2014 Petr Ledvina @ledvinap
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "ExtrusionEntityCollection.hpp"
 #include "ShortestPath.hpp"
 #include <algorithm>
@@ -5,6 +13,20 @@
 #include <map>
 
 namespace Slic3r {
+
+#if 0
+void filter_by_extrusion_role_in_place(ExtrusionEntitiesPtr &extrusion_entities, ExtrusionRole role)
+{
+	if (role != ExtrusionRole::Mixed) {
+		auto first  = extrusion_entities.begin();
+		auto last   = extrusion_entities.end();
+        extrusion_entities.erase(
+            std::remove_if(first, last, [&role](const ExtrusionEntity* ee) {
+                return ee->role() != role; }),
+            last);
+	}
+}
+#endif
 
 ExtrusionEntityCollection::ExtrusionEntityCollection(const ExtrusionPaths &paths)
     : no_sort(false)
@@ -44,12 +66,9 @@ ExtrusionEntityCollection::operator ExtrusionPaths() const
     return paths;
 }
 
-ExtrusionEntity* ExtrusionEntityCollection::clone() const
+ExtrusionEntity *ExtrusionEntityCollection::clone() const
 {
-    ExtrusionEntityCollection* coll = new ExtrusionEntityCollection(*this);
-    for (size_t i = 0; i < coll->entities.size(); ++i)
-        coll->entities[i] = this->entities[i]->clone();
-    return coll;
+    return new ExtrusionEntityCollection(*this);
 }
 
 void ExtrusionEntityCollection::reverse()
@@ -72,33 +91,6 @@ void ExtrusionEntityCollection::remove(size_t i)
 {
     delete this->entities[i];
     this->entities.erase(this->entities.begin() + i);
-}
-
-ExtrusionEntityCollection ExtrusionEntityCollection::chained_path_from(const Point &start_near, ExtrusionRole role) const
-{
-	ExtrusionEntityCollection out;
-	if (this->no_sort) {
-		out = *this;
-	} else {
-		if (role == erMixed)
-			out = *this;
-		else {
-		    for (const ExtrusionEntity *ee : this->entities) {
-		        if (role != erMixed) {
-		            // The caller wants only paths with a specific extrusion role.
-		            auto role2 = ee->role();
-		            if (role != role2) {
-		                // This extrusion entity does not match the role asked.
-		                assert(role2 != erMixed);
-		                continue;
-		            }
-		        }
-		        out.entities.emplace_back(ee->clone());
-		    }
-		}
-		chain_and_reorder_extrusion_entities(out.entities, &start_near);
-	}
-	return out;
 }
 
 void ExtrusionEntityCollection::polygons_covered_by_width(Polygons &out, const float scaled_epsilon) const

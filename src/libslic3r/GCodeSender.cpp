@@ -1,3 +1,9 @@
+///|/ Copyright (c) Prusa Research 2016 - 2021 Vojtěch Bubník @bubnikv, Vojtěch Král @vojtechkral
+///|/ Copyright (c) Slic3r 2014 - 2016 Alessandro Ranellucci @alranel
+///|/ Copyright (c) 2016 Gregor Best
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "GCodeSender.hpp"
 #include <iostream>
 #include <istream>
@@ -134,7 +140,7 @@ GCodeSender::set_baud_rate(unsigned int baud_rate)
         speed_t newSpeed = baud_rate;
         ioctl(handle, IOSSIOSPEED, &newSpeed);
         ::tcsetattr(handle, TCSANOW, &ios);
-#elif __linux
+#elif __linux__
         termios2 ios;
         if (ioctl(handle, TCGETS2, &ios))
             printf("Error in TCGETS2: %s\n", strerror(errno));
@@ -153,7 +159,7 @@ GCodeSender::set_baud_rate(unsigned int baud_rate)
 		if (::tcsetattr(handle, TCSAFLUSH, &ios) != 0)
 			printf("Failed to set baud rate: %s\n", strerror(errno));
 #else
-        //throw invalid_argument ("OS does not currently support custom bauds");
+        //throw Slic3r::InvalidArgument("OS does not currently support custom bauds");
 #endif
     }
 }
@@ -393,7 +399,7 @@ GCodeSender::on_read(const boost::system::error_code& error,
                 }
                 this->send();
             } else {
-                printf("Cannot resend " PRINTF_ZU " (oldest we have is " PRINTF_ZU ")\n", toresend, this->sent - this->last_sent.size());
+                printf("Cannot resend %zu (oldest we have is %zu)\n", toresend, this->sent - this->last_sent.size());
             }
         } else if (boost::starts_with(line, "wait")) {
             // ignore

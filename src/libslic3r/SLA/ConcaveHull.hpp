@@ -1,5 +1,9 @@
-#ifndef CONCAVEHULL_HPP
-#define CONCAVEHULL_HPP
+///|/ Copyright (c) Prusa Research 2019 Tomáš Mészáros @tamasmeszaros
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
+#ifndef SLA_CONCAVEHULL_HPP
+#define SLA_CONCAVEHULL_HPP
 
 #include <libslic3r/ExPolygon.hpp>
 

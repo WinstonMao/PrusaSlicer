@@ -1,7 +1,8 @@
-#include "libslic3r/libslic3r.h"
+///|/ Copyright (c) Prusa Research 2019 - 2020 Lukáš Matěna @lukasmatena, Enrico Turri @enricoturri1966
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "ThumbnailData.hpp"
-
-#if ENABLE_THUMBNAIL_GENERATOR
 
 namespace Slic3r {
 
@@ -32,5 +33,3 @@ bool ThumbnailData::is_valid() const
 }
 
 } // namespace Slic3r
-
-#endif // ENABLE_THUMBNAIL_GENERATOR

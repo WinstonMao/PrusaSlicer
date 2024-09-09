@@ -1,3 +1,18 @@
+///|/ Copyright (c) Prusa Research 2016 - 2023 Vojtěch Bubník @bubnikv, Enrico Turri @enricoturri1966, Tomáš Mészáros @tamasmeszaros, Lukáš Matěna @lukasmatena, Filip Sykala @Jony01, Lukáš Hejl @hejllukas
+///|/ Copyright (c) 2017 Eyal Soha @eyal0
+///|/ Copyright (c) Slic3r 2013 - 2016 Alessandro Ranellucci @alranel
+///|/
+///|/ ported from lib/Slic3r/Geometry.pm:
+///|/ Copyright (c) Prusa Research 2017 - 2022 Vojtěch Bubník @bubnikv
+///|/ Copyright (c) Slic3r 2011 - 2015 Alessandro Ranellucci @alranel
+///|/ Copyright (c) 2013 Jose Luis Perez Diez
+///|/ Copyright (c) 2013 Anders Sundman
+///|/ Copyright (c) 2013 Jesse Vincent
+///|/ Copyright (c) 2012 Mike Sheldrake @mesheldrake
+///|/ Copyright (c) 2012 Mark Hindess
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_Geometry_hpp_
 #define slic3r_Geometry_hpp_
 
@@ -10,14 +25,7 @@
 // Serialization through the Cereal library
 #include <cereal/access.hpp>
 
-#include "boost/polygon/voronoi.hpp"
-
-namespace ClipperLib {
-class PolyNode;
-using PolyNodes = std::vector<PolyNode*>;
-}
-
-namespace Slic3r { namespace Geometry {
+namespace Slic3r::Geometry {
 
 // Generic result of an orientation predicate.
 enum Orientation
@@ -35,10 +43,10 @@ enum Orientation
 // and d is limited to 63 bits + signum and we are good.
 static inline Orientation orient(const Point &a, const Point &b, const Point &c)
 {
-    // BOOST_STATIC_ASSERT(sizeof(coord_t) * 2 == sizeof(int64_t));
-    int64_t u = int64_t(b(0)) * int64_t(c(1)) - int64_t(b(1)) * int64_t(c(0));
-    int64_t v = int64_t(a(0)) * int64_t(c(1)) - int64_t(a(1)) * int64_t(c(0));
-    int64_t w = int64_t(a(0)) * int64_t(b(1)) - int64_t(a(1)) * int64_t(b(0));
+    static_assert(sizeof(coord_t) * 2 == sizeof(int64_t), "orient works with 32 bit coordinates");
+    int64_t u = int64_t(b.x()) * int64_t(c.y()) - int64_t(b.y()) * int64_t(c.x());
+    int64_t v = int64_t(a.x()) * int64_t(c.y()) - int64_t(a.y()) * int64_t(c.x());
+    int64_t w = int64_t(a.x()) * int64_t(b.y()) - int64_t(a.y()) * int64_t(b.x());
     int64_t d = u - v + w;
     return (d > 0) ? ORIENTATION_CCW : ((d == 0) ? ORIENTATION_COLINEAR : ORIENTATION_CW);
 }
@@ -114,38 +122,184 @@ inline bool segment_segment_intersection(const Vec2d &p1, const Vec2d &v1, const
     return true;
 }
 
-
-inline int segments_could_intersect(
-	const Slic3r::Point &ip1, const Slic3r::Point &ip2, 
-	const Slic3r::Point &jp1, const Slic3r::Point &jp2)
-{
-	Vec2i64 iv   = (ip2 - ip1).cast<int64_t>();
-	Vec2i64 vij1 = (jp1 - ip1).cast<int64_t>();
-	Vec2i64 vij2 = (jp2 - ip1).cast<int64_t>();
-	int64_t tij1 = cross2(iv, vij1);
-	int64_t tij2 = cross2(iv, vij2);
-	int     sij1 = (tij1 > 0) ? 1 : ((tij1 < 0) ? -1 : 0); // signum
-	int     sij2 = (tij2 > 0) ? 1 : ((tij2 < 0) ? -1 : 0);
-	return sij1 * sij2;
-}
-
 inline bool segments_intersect(
 	const Slic3r::Point &ip1, const Slic3r::Point &ip2, 
 	const Slic3r::Point &jp1, const Slic3r::Point &jp2)
-{
-	return segments_could_intersect(ip1, ip2, jp1, jp2) <= 0 && 
-		   segments_could_intersect(jp1, jp2, ip1, ip2) <= 0;
+{    
+    assert(ip1 != ip2);
+    assert(jp1 != jp2);
+
+    auto segments_could_intersect = [](
+        const Slic3r::Point &ip1, const Slic3r::Point &ip2,
+        const Slic3r::Point &jp1, const Slic3r::Point &jp2) -> std::pair<int, int>
+    {
+        Vec2i64 iv   = (ip2 - ip1).cast<int64_t>();
+        Vec2i64 vij1 = (jp1 - ip1).cast<int64_t>();
+        Vec2i64 vij2 = (jp2 - ip1).cast<int64_t>();
+        int64_t tij1 = cross2(iv, vij1);
+        int64_t tij2 = cross2(iv, vij2);
+        return std::make_pair(
+            // signum
+            (tij1 > 0) ? 1 : ((tij1 < 0) ? -1 : 0),
+            (tij2 > 0) ? 1 : ((tij2 < 0) ? -1 : 0));
+    };
+
+    std::pair<int, int> sign1 = segments_could_intersect(ip1, ip2, jp1, jp2);
+    std::pair<int, int> sign2 = segments_could_intersect(jp1, jp2, ip1, ip2);
+    int                 test1 = sign1.first * sign1.second;
+    int                 test2 = sign2.first * sign2.second;
+    if (test1 <= 0 && test2 <= 0) {
+        // The segments possibly intersect. They may also be collinear, but not intersect.
+        if (test1 != 0 || test2 != 0)
+            // Certainly not collinear, then the segments intersect.
+            return true;
+        // If the first segment is collinear with the other, the other is collinear with the first segment.
+        assert((sign1.first == 0 && sign1.second == 0) == (sign2.first == 0 && sign2.second == 0));
+        if (sign1.first == 0 && sign1.second == 0) {
+            // The segments are certainly collinear. Now verify whether they overlap.
+            Slic3r::Point vi = ip2 - ip1;
+            // Project both on the longer coordinate of vi.
+            int axis = std::abs(vi.x()) > std::abs(vi.y()) ? 0 : 1;
+            coord_t i = ip1(axis);
+            coord_t j = ip2(axis);
+            coord_t k = jp1(axis);
+            coord_t l = jp2(axis);
+            if (i > j)
+                std::swap(i, j);
+            if (k > l)
+                std::swap(k, l);
+            return (k >= i && k <= j) || (i >= k && i <= l);
+        }
+    }
+    return false;
 }
 
-Pointf3s convex_hull(Pointf3s points);
-Polygon convex_hull(Points points);
-Polygon convex_hull(const Polygons &polygons);
+template<typename T> inline T foot_pt(const T &line_pt, const T &line_dir, const T &pt)
+{
+    T      v   = pt - line_pt;
+    auto   l2  = line_dir.squaredNorm();
+    auto   t   = (l2 == 0) ? 0 : v.dot(line_dir) / l2;
+    return line_pt + line_dir * t;
+}
+
+inline Vec2d foot_pt(const Line &iline, const Point &ipt)
+{
+    return foot_pt<Vec2d>(iline.a.cast<double>(), (iline.b - iline.a).cast<double>(), ipt.cast<double>());
+}
+
+template<typename T> inline auto ray_point_distance_squared(const T &ray_pt, const T &ray_dir, const T &pt)
+{
+    return (foot_pt(ray_pt, ray_dir, pt) - pt).squaredNorm();
+}
+
+template<typename T> inline auto ray_point_distance(const T &ray_pt, const T &ray_dir, const T &pt)
+{
+    return (foot_pt(ray_pt, ray_dir, pt) - pt).norm();
+}
+
+inline double ray_point_distance_squared(const Line &iline, const Point &ipt)
+{
+    return (foot_pt(iline, ipt) - ipt.cast<double>()).squaredNorm();
+}
+
+inline double ray_point_distance(const Line &iline, const Point &ipt)
+{
+    return (foot_pt(iline, ipt) - ipt.cast<double>()).norm();
+}
+
+// Based on Liang-Barsky function by Daniel White @ http://www.skytopia.com/project/articles/compsci/clipping.html
+template<typename T>
+inline bool liang_barsky_line_clipping_interval(
+    // Start and end points of the source line, result will be stored there as well.
+    const Eigen::Matrix<T, 2, 1, Eigen::DontAlign>                  &x0,
+    const Eigen::Matrix<T, 2, 1, Eigen::DontAlign>                  &v,
+    // Bounding box to clip with.
+    const BoundingBoxBase<Eigen::Matrix<T, 2, 1, Eigen::DontAlign>> &bbox,
+    std::pair<double, double>                                       &out_interval)
+{
+    double t0 = 0.0;
+    double t1 = 1.0;
+    // Traverse through left, right, bottom, top edges.
+    auto clip_side = [&t0, &t1](double p, double q) -> bool {
+        if (p == 0) {
+            if (q < 0)
+                // Line parallel to the bounding box edge is fully outside of the bounding box.
+                return false;
+            // else don't clip
+        } else {
+            double r = q / p;
+            if (p < 0) {
+                if (r > t1)
+                    // Fully clipped.
+                    return false;
+                if (r > t0)
+                    // Partially clipped.
+                    t0 = r;
+            } else {
+                assert(p > 0);
+                if (r < t0)
+                    // Fully clipped.
+                    return false;
+                if (r < t1)
+                    // Partially clipped.
+                    t1 = r;
+            }
+        }
+        return true;
+    };
+
+    if (clip_side(- v.x(), - bbox.min.x() + x0.x()) &&
+        clip_side(  v.x(),   bbox.max.x() - x0.x()) &&
+        clip_side(- v.y(), - bbox.min.y() + x0.y()) &&
+        clip_side(  v.y(),   bbox.max.y() - x0.y())) {
+        out_interval.first = t0;
+        out_interval.second = t1;
+        return true;
+    }
+    return false;
+}
+
+template<typename T>
+inline bool liang_barsky_line_clipping(
+	// Start and end points of the source line, result will be stored there as well.
+	Eigen::Matrix<T, 2, 1, Eigen::DontAlign> 						&x0,
+	Eigen::Matrix<T, 2, 1, Eigen::DontAlign> 						&x1,
+	// Bounding box to clip with.
+	const BoundingBoxBase<Eigen::Matrix<T, 2, 1, Eigen::DontAlign>> &bbox)
+{
+    Eigen::Matrix<T, 2, 1, Eigen::DontAlign> v = x1 - x0;
+    std::pair<double, double> interval;
+    if (liang_barsky_line_clipping_interval(x0, v, bbox, interval)) {
+        // Clipped successfully.
+        x1  = x0 + interval.second * v;
+        x0 += interval.first * v;
+        return true;
+    }
+    return false;
+}
+
+// Based on Liang-Barsky function by Daniel White @ http://www.skytopia.com/project/articles/compsci/clipping.html
+template<typename T>
+bool liang_barsky_line_clipping(
+	// Start and end points of the source line.
+	const Eigen::Matrix<T, 2, 1, Eigen::DontAlign> 					&x0src,
+	const Eigen::Matrix<T, 2, 1, Eigen::DontAlign> 					&x1src,
+	// Bounding box to clip with.
+	const BoundingBoxBase<Eigen::Matrix<T, 2, 1, Eigen::DontAlign>> &bbox,
+	// Start and end points of the clipped line.
+	Eigen::Matrix<T, 2, 1, Eigen::DontAlign> 						&x0clip,
+	Eigen::Matrix<T, 2, 1, Eigen::DontAlign> 						&x1clip)
+{
+	x0clip = x0src;
+	x1clip = x1src;
+	return liang_barsky_line_clipping(x0clip, x1clip, bbox);
+}
 
 bool directions_parallel(double angle1, double angle2, double max_diff = 0);
+bool directions_perpendicular(double angle1, double angle2, double max_diff = 0);
 template<class T> bool contains(const std::vector<T> &vector, const Point &point);
 template<typename T> T rad2deg(T angle) { return T(180.0) * angle / T(PI); }
-double rad2deg_dir(double angle);
-template<typename T> T deg2rad(T angle) { return T(PI) * angle / T(180.0); }
+template<typename T> constexpr T deg2rad(const T angle) { return T(PI) * angle / T(180.0); }
 template<typename T> T angle_to_0_2PI(T angle)
 {
     static const T TWO_PI = T(2) * T(PI);
@@ -160,14 +314,13 @@ template<typename T> T angle_to_0_2PI(T angle)
 
     return angle;
 }
-
-/// Find the center of the circle corresponding to the vector of Points as an arc.
-Point circle_taubin_newton(const Points::const_iterator& input_start, const Points::const_iterator& input_end, size_t cycles = 20);
-inline Point circle_taubin_newton(const Points& input, size_t cycles = 20) { return circle_taubin_newton(input.cbegin(), input.cend(), cycles); }
-
-/// Find the center of the circle corresponding to the vector of Pointfs as an arc.
-Vec2d circle_taubin_newton(const Vec2ds::const_iterator& input_start, const Vec2ds::const_iterator& input_end, size_t cycles = 20);
-inline Vec2d circle_taubin_newton(const Vec2ds& input, size_t cycles = 20) { return circle_taubin_newton(input.cbegin(), input.cend(), cycles); }
+template<typename T> void to_range_pi_pi(T &angle){
+    if (angle > T(PI) || angle <= -T(PI)) {
+        int count = static_cast<int>(std::round(angle / (2 * PI)));
+        angle -= static_cast<T>(count * 2 * PI);
+        assert(angle <= T(PI) && angle > -T(PI));
+    }
+}
 
 void simplify_polygons(const Polygons &polygons, double tolerance, Polygons* retval);
 
@@ -178,34 +331,6 @@ bool arrange(
     // output
     Pointfs &positions);
 
-class MedialAxis {
-    public:
-    Lines lines;
-    const ExPolygon* expolygon;
-    double max_width;
-    double min_width;
-    MedialAxis(double _max_width, double _min_width, const ExPolygon* _expolygon = NULL)
-        : expolygon(_expolygon), max_width(_max_width), min_width(_min_width) {};
-    void build(ThickPolylines* polylines);
-    void build(Polylines* polylines);
-    
-    private:
-    class VD : public boost::polygon::voronoi_diagram<double> {
-    public:
-        typedef double                                          coord_type;
-        typedef boost::polygon::point_data<coordinate_type>     point_type;
-        typedef boost::polygon::segment_data<coordinate_type>   segment_type;
-        typedef boost::polygon::rectangle_data<coordinate_type> rect_type;
-    };
-    VD vd;
-    std::set<const VD::edge_type*> edges, valid_edges;
-    std::map<const VD::edge_type*, std::pair<coordf_t,coordf_t> > thickness;
-    void process_edge_neighbors(const VD::edge_type* edge, ThickPolyline* polyline);
-    bool validate_edge(const VD::edge_type* edge);
-    const Line& retrieve_segment(const VD::cell_type* cell) const;
-    const Point& retrieve_endpoint(const VD::cell_type* cell) const;
-};
-
 // Sets the given transform by assembling the given transformations in the following order:
 // 1) mirror
 // 2) scale
@@ -213,7 +338,8 @@ class MedialAxis {
 // 4) rotate Y
 // 5) rotate Z
 // 6) translate
-void assemble_transform(Transform3d& transform, const Vec3d& translation = Vec3d::Zero(), const Vec3d& rotation = Vec3d::Zero(), const Vec3d& scale = Vec3d::Ones(), const Vec3d& mirror = Vec3d::Ones());
+void assemble_transform(Transform3d& transform, const Vec3d& translation = Vec3d::Zero(), const Vec3d& rotation = Vec3d::Zero(),
+    const Vec3d& scale = Vec3d::Ones(), const Vec3d& mirror = Vec3d::Ones());
 
 // Returns the transform obtained by assembling the given transformations in the following order:
 // 1) mirror
@@ -222,107 +348,167 @@ void assemble_transform(Transform3d& transform, const Vec3d& translation = Vec3d
 // 4) rotate Y
 // 5) rotate Z
 // 6) translate
-Transform3d assemble_transform(const Vec3d& translation = Vec3d::Zero(), const Vec3d& rotation = Vec3d::Zero(), const Vec3d& scale = Vec3d::Ones(), const Vec3d& mirror = Vec3d::Ones());
+Transform3d assemble_transform(const Vec3d& translation = Vec3d::Zero(), const Vec3d& rotation = Vec3d::Zero(),
+    const Vec3d& scale = Vec3d::Ones(), const Vec3d& mirror = Vec3d::Ones());
+
+// Sets the given transform by multiplying the given transformations in the following order:
+// T = translation * rotation * scale * mirror
+void assemble_transform(Transform3d& transform, const Transform3d& translation = Transform3d::Identity(),
+    const Transform3d& rotation = Transform3d::Identity(), const Transform3d& scale = Transform3d::Identity(),
+    const Transform3d& mirror = Transform3d::Identity());
+
+// Returns the transform obtained by multiplying the given transformations in the following order:
+// T = translation * rotation * scale * mirror
+Transform3d assemble_transform(const Transform3d& translation = Transform3d::Identity(), const Transform3d& rotation = Transform3d::Identity(),
+    const Transform3d& scale = Transform3d::Identity(), const Transform3d& mirror = Transform3d::Identity());
+
+// Sets the given transform by assembling the given translation
+void translation_transform(Transform3d& transform, const Vec3d& translation);
+
+// Returns the transform obtained by assembling the given translation
+Transform3d translation_transform(const Vec3d& translation);
+
+// Sets the given transform by assembling the given rotations in the following order:
+// 1) rotate X
+// 2) rotate Y
+// 3) rotate Z
+void rotation_transform(Transform3d& transform, const Vec3d& rotation);
+
+// Returns the transform obtained by assembling the given rotations in the following order:
+// 1) rotate X
+// 2) rotate Y
+// 3) rotate Z
+Transform3d rotation_transform(const Vec3d& rotation);
+
+// Sets the given transform by assembling the given scale factors
+void scale_transform(Transform3d& transform, double scale);
+void scale_transform(Transform3d& transform, const Vec3d& scale);
+
+// Returns the transform obtained by assembling the given scale factors
+Transform3d scale_transform(double scale);
+Transform3d scale_transform(const Vec3d& scale);
 
 // Returns the euler angles extracted from the given rotation matrix
 // Warning -> The matrix should not contain any scale or shear !!!
-Vec3d extract_euler_angles(const Eigen::Matrix<double, 3, 3, Eigen::DontAlign>& rotation_matrix);
+Vec3d extract_rotation(const Eigen::Matrix<double, 3, 3, Eigen::DontAlign>& rotation_matrix);
 
 // Returns the euler angles extracted from the given affine transform
 // Warning -> The transform should not contain any shear !!!
-Vec3d extract_euler_angles(const Transform3d& transform);
+Vec3d extract_rotation(const Transform3d& transform);
 
 class Transformation
 {
-    struct Flags
-    {
-        bool dont_translate;
-        bool dont_rotate;
-        bool dont_scale;
-        bool dont_mirror;
-
-        Flags();
-
-        bool needs_update(bool dont_translate, bool dont_rotate, bool dont_scale, bool dont_mirror) const;
-        void set(bool dont_translate, bool dont_rotate, bool dont_scale, bool dont_mirror);
-    };
-
-    Vec3d m_offset;              // In unscaled coordinates
-    Vec3d m_rotation;            // Rotation around the three axes, in radians around mesh center point
-    Vec3d m_scaling_factor;      // Scaling factors along the three axes
-    Vec3d m_mirror;              // Mirroring along the three axes
-
-    mutable Transform3d m_matrix;
-    mutable Flags m_flags;
-    mutable bool m_dirty;
+    Transform3d m_matrix{ Transform3d::Identity() };
 
 public:
-    Transformation();
-    explicit Transformation(const Transform3d& transform);
+    Transformation() = default;
+    explicit Transformation(const Transform3d& transform) : m_matrix(transform) {}
 
-    const Vec3d& get_offset() const { return m_offset; }
-    double get_offset(Axis axis) const { return m_offset(axis); }
+    Vec3d get_offset() const { return m_matrix.translation(); }
+    double get_offset(Axis axis) const { return get_offset()[axis]; }
 
-    void set_offset(const Vec3d& offset);
-    void set_offset(Axis axis, double offset);
+    Transform3d get_offset_matrix() const;
 
-    const Vec3d& get_rotation() const { return m_rotation; }
-    double get_rotation(Axis axis) const { return m_rotation(axis); }
+    void set_offset(const Vec3d& offset) { m_matrix.translation() = offset; }
+    void set_offset(Axis axis, double offset) { m_matrix.translation()[axis] = offset; }
+
+    Vec3d get_rotation() const;
+    double get_rotation(Axis axis) const { return get_rotation()[axis]; }
+
+    Transform3d get_rotation_matrix() const;
 
     void set_rotation(const Vec3d& rotation);
     void set_rotation(Axis axis, double rotation);
 
-    const Vec3d& get_scaling_factor() const { return m_scaling_factor; }
-    double get_scaling_factor(Axis axis) const { return m_scaling_factor(axis); }
+    Vec3d get_scaling_factor() const;
+    double get_scaling_factor(Axis axis) const { return get_scaling_factor()[axis]; }
+
+    Transform3d get_scaling_factor_matrix() const;
+
+    bool is_scaling_uniform() const {
+        const Vec3d scale = get_scaling_factor();
+        return std::abs(scale.x() - scale.y()) < 1e-8 && std::abs(scale.x() - scale.z()) < 1e-8;
+    }
 
     void set_scaling_factor(const Vec3d& scaling_factor);
     void set_scaling_factor(Axis axis, double scaling_factor);
-    bool is_scaling_uniform() const { return std::abs(m_scaling_factor.x() - m_scaling_factor.y()) < 1e-8 && std::abs(m_scaling_factor.x() - m_scaling_factor.z()) < 1e-8; }
 
-    const Vec3d& get_mirror() const { return m_mirror; }
-    double get_mirror(Axis axis) const { return m_mirror(axis); }
-    bool is_left_handed() const { return m_mirror.x() * m_mirror.y() * m_mirror.z() < 0.; }
+    Vec3d get_mirror() const;
+    double get_mirror(Axis axis) const { return get_mirror()[axis]; }
+
+    Transform3d get_mirror_matrix() const;
+
+    bool is_left_handed() const {
+        return m_matrix.linear().determinant() < 0;
+    }
 
     void set_mirror(const Vec3d& mirror);
     void set_mirror(Axis axis, double mirror);
 
-    void set_from_transform(const Transform3d& transform);
-    void set_from_string(const std::string& transform_str);
+    bool has_skew() const;
 
     void reset();
+    void reset_offset() { set_offset(Vec3d::Zero()); }
+    void reset_rotation();
+    void reset_scaling_factor();
+    void reset_mirror() { set_mirror(Vec3d::Ones()); }
+    void reset_skew();
 
-    const Transform3d& get_matrix(bool dont_translate = false, bool dont_rotate = false, bool dont_scale = false, bool dont_mirror = false) const;
+    const Transform3d& get_matrix() const { return m_matrix; }
+    Transform3d get_matrix_no_offset() const;
+    Transform3d get_matrix_no_scaling_factor() const;
+
+    Transform3d get_matrix_with_applied_shrinkage_compensation(const Vec3d &shrinkage_compensation) const;
+
+    void set_matrix(const Transform3d& transform) { m_matrix = transform; }
 
     Transformation operator * (const Transformation& other) const;
 
-    // Find volume transformation, so that the chained (instance_trafo * volume_trafo) will be as close to identity
-    // as possible in least squares norm in regard to the 8 corners of bbox.
-    // Bounding box is expected to be centered around zero in all axes.
-    static Transformation volume_to_bed_transformation(const Transformation& instance_transformation, const BoundingBoxf3& bbox);
-
 private:
-	friend class cereal::access;
-	template<class Archive> void serialize(Archive & ar) { ar(m_offset, m_rotation, m_scaling_factor, m_mirror); }
-	explicit Transformation(int) : m_dirty(true) {}
-	template <class Archive> static void load_and_construct(Archive &ar, cereal::construct<Transformation> &construct)
-	{
-		// Calling a private constructor with special "int" parameter to indicate that no construction is necessary.
-		construct(1);
-		ar(construct.ptr()->m_offset, construct.ptr()->m_rotation, construct.ptr()->m_scaling_factor, construct.ptr()->m_mirror);
-	}
+    friend class cereal::access;
+    template<class Archive> void serialize(Archive& ar) { ar(m_matrix); }
+    explicit Transformation(int) {}
+    template <class Archive> static void load_and_construct(Archive& ar, cereal::construct<Transformation>& construct)
+    {
+        // Calling a private constructor with special "int" parameter to indicate that no construction is necessary.
+        construct(1);
+        ar(construct.ptr()->m_matrix);
+    }
 };
+
+struct TransformationSVD
+{
+    Matrix3d u{ Matrix3d::Identity() };
+    Matrix3d s{ Matrix3d::Identity() };
+    Matrix3d v{ Matrix3d::Identity() };
+
+    bool mirror{ false };
+    bool scale{ false };
+    bool anisotropic_scale{ false };
+    bool rotation{ false };
+    bool rotation_90_degrees{ false };
+    bool skew{ false };
+
+    explicit TransformationSVD(const Transformation& trafo) : TransformationSVD(trafo.get_matrix()) {}
+    explicit TransformationSVD(const Transform3d& trafo);
+
+    Eigen::DiagonalMatrix<double, 3, 3> mirror_matrix() const { return Eigen::DiagonalMatrix<double, 3, 3>(this->mirror ? -1. : 1., 1., 1.); }
+};
+
+// For parsing a transformation matrix from 3MF / AMF.
+extern Transform3d transform3d_from_string(const std::string& transform_str);
 
 // Rotation when going from the first coordinate system with rotation rot_xyz_from applied
 // to a coordinate system with rot_xyz_to applied.
 extern Eigen::Quaterniond rotation_xyz_diff(const Vec3d &rot_xyz_from, const Vec3d &rot_xyz_to);
 // Rotation by Z to align rot_xyz_from to rot_xyz_to.
 // This should only be called if it is known, that the two rotations only differ in rotation around the Z axis.
-extern double rotation_diff_z(const Vec3d &rot_xyz_from, const Vec3d &rot_xyz_to);
+extern double rotation_diff_z(const Transform3d &trafo_from, const Transform3d &trafo_to);
 
 // Is the angle close to a multiple of 90 degrees?
 inline bool is_rotation_ninety_degrees(double a)
 {
-    a = fmod(std::abs(a), 0.5 * M_PI);
+    a = fmod(std::abs(a), 0.5 * PI);
     if (a > 0.25 * PI)
         a = 0.5 * PI - a;
     return a < 0.001;
@@ -334,6 +520,53 @@ inline bool is_rotation_ninety_degrees(const Vec3d &rotation)
     return is_rotation_ninety_degrees(rotation.x()) && is_rotation_ninety_degrees(rotation.y()) && is_rotation_ninety_degrees(rotation.z());
 }
 
-} }
+// Returns true if one transformation may be converted into another transformation by
+// rotation around Z and by mirroring in X / Y only. Two objects sharing such transformation
+// may share support structures and they share Z height.
+bool trafos_differ_in_rotation_by_z_and_mirroring_by_xy_only(const Transform3d &t1, const Transform3d &t2);
+inline bool trafos_differ_in_rotation_by_z_and_mirroring_by_xy_only(const Transformation &t1, const Transformation &t2)
+    { return trafos_differ_in_rotation_by_z_and_mirroring_by_xy_only(t1.get_matrix(), t2.get_matrix()); }
+
+template <class Tout = double, class Tin>
+std::pair<Tout, Tout> dir_to_spheric(const Vec<3, Tin> &n, Tout norm = 1.)
+{
+    Tout z       = n.z();
+    Tout r       = norm;
+    Tout polar   = std::acos(z / r);
+    Tout azimuth = std::atan2(n(1), n(0));
+    return {polar, azimuth};
+}
+
+template <class T = double>
+Vec<3, T> spheric_to_dir(double polar, double azimuth)
+{
+    return {T(std::cos(azimuth) * std::sin(polar)),
+            T(std::sin(azimuth) * std::sin(polar)), T(std::cos(polar))};
+}
+
+template <class T = double, class Pair>
+Vec<3, T> spheric_to_dir(const Pair &v)
+{
+    double plr = std::get<0>(v), azm = std::get<1>(v);
+    return spheric_to_dir<T>(plr, azm);
+}
+
+/**
+ * Checks if a given point is inside a corner of a polygon.
+ *
+ * The corner of a polygon is defined by three points A, B, C in counterclockwise order.
+ *
+ * Adapted from CuraEngine LinearAlg2D::isInsideCorner by Tim Kuipers @BagelOrb
+ * and @Ghostkeeper.
+ *
+ * @param a The first point of the corner.
+ * @param b The second point of the corner (the common vertex of the two edges forming the corner).
+ * @param c The third point of the corner.
+ * @param query_point The point to be checked if is inside the corner.
+ * @return True if the query point is inside the corner, false otherwise.
+ */
+bool is_point_inside_polygon_corner(const Point &a, const Point &b, const Point &c, const Point &query_point);
+
+} // namespace Slic3r::Geometry
 
 #endif

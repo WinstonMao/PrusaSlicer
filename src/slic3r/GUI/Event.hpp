@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2018 - 2020 Vojtěch Bubník @bubnikv, Oleksandra Iushchenko @YuSanka, Vojtěch Král @vojtechkral
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_Events_hpp_
 #define slic3r_Events_hpp_
 
@@ -40,11 +44,19 @@ template<class T, size_t N> struct ArrayEvent : public wxEvent
         return new ArrayEvent<T, N>(GetEventType(), data, GetEventObject());
     }
 };
-template<class T> struct ArrayEvent<T, 1> : public wxEvent
+
+template<class T> struct Event : public wxEvent
 {
     T data;
 
-    ArrayEvent(wxEventType type, T data, wxObject* origin = nullptr)
+    Event(wxEventType type, const T &data, wxObject* origin = nullptr)
+        : wxEvent(0, type), data(std::move(data))
+    {
+        m_propagationLevel = wxEVENT_PROPAGATE_MAX;
+        SetEventObject(origin);
+    }
+
+    Event(wxEventType type, T&& data, wxObject* origin = nullptr)
         : wxEvent(0, type), data(std::move(data))
     {
         m_propagationLevel = wxEVENT_PROPAGATE_MAX;
@@ -53,12 +65,9 @@ template<class T> struct ArrayEvent<T, 1> : public wxEvent
 
     virtual wxEvent* Clone() const
     {
-        return new ArrayEvent<T, 1>(GetEventType(), data, GetEventObject());
+        return new Event<T>(GetEventType(), data, GetEventObject());
     }
 };
-
-template <class T> using Event = ArrayEvent<T, 1>;
-
 
 }
 }
